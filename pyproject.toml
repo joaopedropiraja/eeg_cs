@@ -1,0 +1,105 @@
+[project]
+name = "eeg-cs"
+version = "0.1.0"
+description = "Codebase for TCC"
+readme = "README.md"
+authors = [{name = "João Pedro Lima Pirajá", email = "jplp100@hotmail.com"}]
+requires-python = "<4.0,>=3.12"
+dependencies = [
+    "numpy<3.0.0,>=2.2.5",
+    "mne[full-pyqt6]<2.0.0,>=1.9.0",
+    "matplotlib<4.0.0,>=3.10.1",
+    "pyqt6<7.0.0,>=6.9.0",
+    "plotly<7.0.0,>=6.0.1",
+    "cvxpy[ecos,glpk]<2.0.0,>=1.6.5",
+    "cr-sparse<1.0.0,>=0.4.0",
+    "jax<1.0.0,>=0.6.1",
+    "pandas<3.0.0,>=2.2.3",
+    "mne-bids<1.0.0,>=0.16.0",
+    "spgl1<1.0.0,>=0.0.3",
+    "pywavelets>=1.8.0",
+    "duckdb>=1.3.1",
+]
+
+[dependency-groups]
+dev = [
+    "jupyter<2.0.0,>=1.1.1",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+fix = true
+show-fixes = true
+indent-width = 2
+exclude = ["venv", ".venv", "env", ".env", "node_modules", "__pycache__"]
+
+[tool.ruff.lint]
+select = [
+    "ASYNC",
+    "A",
+    "ANN",
+    "B",
+    "BLE",
+    "C4",
+    "C90",
+    "COM",
+    "E",
+    "EM",
+    "ERA",
+    "EXE",
+    "F",
+    "FBT",
+    "FIX",
+    "I",
+    "ICN",
+    "ISC",
+    "Q",
+    "RET",
+    "RSE",
+    "S",
+    "SIM",
+    "SLF",
+    "T10",
+    "T20",
+    "TC",
+    "TD",
+    "TRY",
+    "UP",
+    "W",
+    "YTT",
+    "RUF",
+    "N",
+]
+ignore = ["T201", "COM812", "N803", "N806", "ERA001"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.ruff.lint.isort]
+known-first-party = ["eeg_cs"]
+
+[tool.pyright]
+typeCheckingMode = "strict"
+pythonVersion = "3.13"
+include = ["src", 'tests']
+exclude = [
+    "**/venv",
+    "**/.venv",
+    "**/env",
+    "**/.env",
+    "**/__pycache__",
+]
+venv = ".venv"
+venvPath = "."
+executionEnvironments = [{ root = "." }]
+
+[tool.uv.workspace]
+members = [
+    "models",
+    "src",
+    "src/models",
+    "src/evaluations",
+]
