@@ -61,7 +61,7 @@ class Loader(ABC):
     rng = np.random.default_rng(self.random_state)
 
     available_possible_starts_by_file: dict[str, list[int] | None] = dict.fromkeys(
-      file_paths
+      file_paths, None
     )
     blocks: list[npt.NDArray[np.float64]] = []
 
@@ -391,6 +391,7 @@ class BCIIIILoader(Loader):
     if data.ndim == 3:
       epochs, samples, channels = data.shape
       data = data.reshape(epochs * samples, channels)
+
     return data
 
   def _load_file_paths(self) -> list[str]:
@@ -401,6 +402,7 @@ class BCIIIILoader(Loader):
       raise FileNotFoundError(error_msg)
 
     return mat_file_paths
+
 
 if __name__ == "__main__":
   loader = CHBMITLoader(

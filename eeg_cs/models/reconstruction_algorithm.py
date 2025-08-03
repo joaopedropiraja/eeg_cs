@@ -1,10 +1,10 @@
 from abc import ABC, abstractmethod
 
-import cr.sparse.cvx.spgl1 as crspgl1
-import cvxpy as cp
 import numpy as np
 import numpy.typing as npt
-from cr.sparse import lop
+import spgl1
+
+# from cr.sparse import lop
 from sklearn.linear_model import OrthogonalMatchingPursuit as SklearnOMP
 
 
@@ -17,88 +17,6 @@ class ReconstructionAlgorithm(ABC):
   def solve(
     self, Y: npt.NDArray[np.float64], Theta: npt.NDArray[np.float64]
   ) -> npt.NDArray[np.float64]: ...
-
-
-class BasisPursuit(ReconstructionAlgorithm):
-  """
-  Basis Pursuit.
-  """
-
-  def __init__(self, **kwargs: dict[str, bool | int | str]):
-    """
-    Parameters
-    ----------
-    kwargs : dict
-        Additional arguments for the optimization problem.
-    """
-    self.kwargs = kwargs or {}
-
-  def solve(
-    self, Y: npt.NDArray[np.float64], Theta: npt.NDArray[np.float64]
-  ) -> npt.NDArray[np.float64]:
-    if Y.ndim == 1:
-      Y = Y[:, np.newaxis]
-
-    S = []
-    for y in Y.T:
-      s = self._solve_single(y, Theta)
-      S.append(s)
-
-    return np.array(S).T
-
-  def _solve_single(
-    self, y: npt.NDArray[np.float64], Theta: npt.NDArray[np.float64]
-  ) -> npt.NDArray[np.float64]:
-    alpha = cp.Variable(Theta.shape[1])
-    objective = cp.Minimize(cp.norm1(alpha))
-    constraints = [y == Theta @ alpha]
-    prob = cp.Problem(objective, constraints)
-    prob.solve(**self.kwargs)
-    if prob.status != cp.OPTIMAL:
-      raise ValueError("The optimization problem is not solvable.")
-
-    return np.asarray(alpha.value, dtype=np.float32)
-
-
-class BasisPursuitDenoising(ReconstructionAlgorithm):
-  """
-  Basis Pursuit Denoising (BPDN).
-  Solves: min ||alpha||_1  s.t.  ||Y - Theta @ alpha||_2 <= epsilon
-  """
-
-  def __init__(self, epsilon: float = 1e-3, **kwargs):
-    """
-    Parameters
-    ----------
-    epsilon : float
-        Allowed reconstruction error (noise level).
-    kwargs : dict
-        Additional arguments for the optimization solver.
-    """
-    self.epsilon = epsilon
-    self.kwargs = kwargs or {}
-
-  def solve(self, Y: np.ndarray, Theta: np.ndarray) -> np.ndarray:
-    if Y.ndim == 1:
-      Y = Y[:, np.newaxis]
-
-    S = []
-    for y in Y.T:
-      s = self._solve_single(y, Theta)
-      S.append(s)
-
-    return np.array(S).T
-
-  def _solve_single(self, y: np.ndarray, Theta: np.ndarray) -> np.ndarray:
-    alpha = cp.Variable(Theta.shape[1])
-    objective = cp.Minimize(cp.norm1(alpha))
-    constraints = [cp.norm2(y - Theta @ alpha) <= self.epsilon]
-    prob = cp.Problem(objective, constraints)
-    prob.solve(**self.kwargs)
-    if prob.status != cp.OPTIMAL:
-      raise ValueError("The optimization problem is not solvable.")
-
-    return np.asarray(alpha.value, dtype=np.float32)
 
 
 class OrthogonalMatchingPursuit(ReconstructionAlgorithm):
@@ -301,45 +219,255 @@ class SimultaneousOrthogonalMatchingPursuit(ReconstructionAlgorithm):
     return X
 
 
-class SPGL1BasisPursuit(ReconstructionAlgorithm):
+# class SPGL1BasisPursuit(ReconstructionAlgorithm):
+#   """
+#   Basis Pursuit using SPGL1 from cr-sparse.
+#   """
+
+#   def __init__(self, max_iter: int = 1000):
+#     self.max_iter = max_iter
+
+#   def solve(
+#     self, Y: npt.NDArray[np.float64], Theta: npt.NDArray[np.float64]
+#   ) -> npt.NDArray[np.float64]:
+#     Theta_op = lop.matrix(Theta)
+#     options = crspgl1.SPGL1Options(max_iters=self.max_iter)
+
+#     if Y.ndim == 1:
+#       Y = Y[:, np.newaxis]  # type: ignore
+
+#     S = []
+#     for y in Y.T:
+#       sol = crspgl1.solve_bp(Theta_op, y, options=options)
+#       s = sol.x
+#       S.append(s)
+
+#     return np.array(S).T
+
+
+# class SPGL1BasisPursuitDenoising(ReconstructionAlgorithm):
+#   """
+#   Basis Pursuit Denoising using SPGL1 from cr-sparse.
+#   """
+
+#   def __init__(self, sigma_factor: float = 0.01, max_iter: int = 1000):
+#     """
+#     Parameters
+#     ----------
+#     sigma_factor : float
+#         Fraction of measurement norm to use as noise bound (sigma).
+#     max_iter : int
+#         Maximum number of SPGL1 iterations.
+#     """
+#     self.sigma_factor = sigma_factor
+#     self.max_iter = max_iter
+
+#   def solve(
+#     self, Y: npt.NDArray[np.float64], Theta: npt.NDArray[np.float64]
+#   ) -> npt.NDArray[np.float64]:
+#     """
+#     Solves min ||alpha||_1 s.t. ||Y - Theta @ alpha||_2 <= sigma using SPGL1.
+
+#     Parameters
+#     ----------
+#     Y : npt.NDArray[np.float64]
+#         Measurements (shape: (m,) or (m, n_signals))
+#     Theta : operator or ndarray
+#         Sensing matrix or operator (should support .times and .trans)
+#     x0 : npt.NDArray[np.float64], optional
+#         Initial guess for the solution.
+
+#     Returns
+#     -------
+#     alpha : npt.NDArray[np.float64]
+#         Solution coefficients (shape: (n,) or (n, n_signals))
+#     """
+#     # If Theta is a numpy array, wrap it as a cr-sparse operator
+#     Theta_op = lop.matrix(Theta)
+#     options = crspgl1.SPGL1Options(max_iters=self.max_iter)
+
+#     if Y.ndim == 1:
+#       Y = Y[:, np.newaxis]  # type: ignore
+
+#     S = []
+#     for y in Y.T:
+#       sigma = self.sigma_factor * np.linalg.norm(y)
+#       sol = crspgl1.solve_bpic_jit(Theta_op, y, sigma, options)
+#       S.append(sol.x)
+
+#     return np.array(S).T
+
+
+class ApproximateMessagePassing(ReconstructionAlgorithm):
   """
-  Basis Pursuit using SPGL1 from cr-sparse.
+  Approximate Message Passing (AMP) reconstruction algorithm.
   """
 
-  def __init__(self, max_iter: int = 1000):
+  def __init__(self, max_iter: int = 100, tol: float = 1e-6):
+    """
+    Parameters
+    ----------
+    max_iter : int
+        Maximum number of iterations for the AMP algorithm.
+    tol : float
+        Tolerance for convergence.
+    """
     self.max_iter = max_iter
+    self.tol = tol
 
   def solve(
     self, Y: npt.NDArray[np.float64], Theta: npt.NDArray[np.float64]
   ) -> npt.NDArray[np.float64]:
-    Theta_op = lop.matrix(Theta)
-    options = crspgl1.SPGL1Options(max_iters=self.max_iter)
+    """
+    Solve the sparse signal reconstruction using AMP.
 
+    Parameters
+    ----------
+    Y : npt.NDArray[np.float64]
+        Measurements (shape: (m,) or (m, n_signals)).
+    Theta : npt.NDArray[np.float64]
+        Sensing matrix (shape: (m, n)).
+
+    Returns
+    -------
+    npt.NDArray[np.float64]
+        Reconstructed sparse coefficients (shape: (n,) or (n, n_signals)).
+    """
     if Y.ndim == 1:
-      Y = Y[:, np.newaxis]  # type: ignore
+      Y = Y[:, np.newaxis]  # Ensure Y is 2D for multiple signals.
+
+    m, n = Theta.shape
+    S = []
+
+    for y in Y.T:
+      # Initialize variables
+      x_hat = np.zeros(n)  # Initial estimate of the sparse signal
+      z = y.copy()  # Residual
+      Theta_T = Theta.T  # Precompute transpose for efficiency
+
+      for _ in range(self.max_iter):
+        # Update sparse signal estimate
+        x_hat = self._soft_threshold(Theta_T @ z + x_hat, 1 / np.sqrt(m))
+
+        # Update residual
+        z = (
+          y
+          - Theta @ x_hat
+          + (z / m)
+          * np.sum(self._soft_threshold_derivative(Theta_T @ z + x_hat, 1 / np.sqrt(m)))
+        )
+
+        # Check convergence
+        if np.linalg.norm(z) < self.tol:
+          break
+
+      S.append(x_hat)
+
+    return np.array(S).T
+
+  @staticmethod
+  def _soft_threshold(
+    x: npt.NDArray[np.float64], threshold: float
+  ) -> npt.NDArray[np.float64]:
+    """
+    Soft thresholding operator.
+
+    Parameters
+    ----------
+    x : npt.NDArray[np.float64]
+        Input array.
+    threshold : float
+        Threshold value.
+
+    Returns
+    -------
+    npt.NDArray[np.float64]
+        Thresholded array.
+    """
+    return np.sign(x) * np.maximum(np.abs(x) - threshold, 0)
+
+  @staticmethod
+  def _soft_threshold_derivative(
+    x: npt.NDArray[np.float64], threshold: float
+  ) -> npt.NDArray[np.float64]:
+    """
+    Derivative of the soft thresholding operator.
+
+    Parameters
+    ----------
+    x : npt.NDArray[np.float64]
+        Input array.
+    threshold : float
+        Threshold value.
+
+    Returns
+    -------
+    npt.NDArray[np.float64]
+        Derivative array.
+    """
+    return (np.abs(x) > threshold).astype(np.float64)
+
+
+class SPGL1BasisPursuit2(ReconstructionAlgorithm):
+  """
+  Basis Pursuit using SPGL1 Python library.
+  """
+
+  def __init__(self, max_iter: int = 1000, tol: float = 1e-6) -> None:
+    """
+    Parameters
+    ----------
+    max_iter : int
+        Maximum number of iterations for SPGL1.
+    tol : float
+        Tolerance for the residual norm.
+    """
+    self.max_iter = max_iter
+    self.tol = tol
+
+  def solve(
+    self, Y: npt.NDArray[np.float64], Theta: npt.NDArray[np.float64]
+  ) -> npt.NDArray[np.float64]:
+    """
+    Solve Basis Pursuit problem using SPGL1.
+
+    Parameters
+    ----------
+    Y : npt.NDArray[np.float64]
+        Measurements (shape: (m,) or (m, n_signals)).
+    Theta : npt.NDArray[np.float64]
+        Sensing matrix (shape: (m, n)).
+
+    Returns
+    -------
+    npt.NDArray[np.float64]
+        Reconstructed sparse coefficients (shape: (n,) or (n, n_signals)).
+    """
+    if Y.ndim == 1:
+      Y = Y[:, np.newaxis]  # Ensure Y is 2D for multiple signals.
 
     S = []
     for y in Y.T:
-      sol = crspgl1.solve_bp(Theta_op, y, options=options)
-      s = sol.x
-      S.append(s)
+      # Solve Basis Pursuit problem
+      x, _, _, _ = spgl1.spg_bp(Theta, y, iter_lim=self.max_iter, bp_tol=self.tol)
+      S.append(x)
 
     return np.array(S).T
 
 
-class SPGL1BasisPursuitDenoising(ReconstructionAlgorithm):
+class SPGL1BasisPursuitDenoising2(ReconstructionAlgorithm):
   """
-  Basis Pursuit Denoising using SPGL1 from cr-sparse.
+  Basis Pursuit using SPGL1 Python library.
   """
 
-  def __init__(self, sigma_factor: float = 0.01, max_iter: int = 1000):
+  def __init__(self, max_iter: int = 1000, sigma_factor: float = 0.001) -> None:
     """
     Parameters
     ----------
-    sigma_factor : float
-        Fraction of measurement norm to use as noise bound (sigma).
     max_iter : int
-        Maximum number of SPGL1 iterations.
+        Maximum number of iterations for SPGL1.
+    tol : float
+        Tolerance for the residual norm.
     """
     self.sigma_factor = sigma_factor
     self.max_iter = max_iter
@@ -348,33 +476,28 @@ class SPGL1BasisPursuitDenoising(ReconstructionAlgorithm):
     self, Y: npt.NDArray[np.float64], Theta: npt.NDArray[np.float64]
   ) -> npt.NDArray[np.float64]:
     """
-    Solves min ||alpha||_1 s.t. ||Y - Theta @ alpha||_2 <= sigma using SPGL1.
+    Solve Basis Pursuit problem using SPGL1.
 
     Parameters
     ----------
     Y : npt.NDArray[np.float64]
-        Measurements (shape: (m,) or (m, n_signals))
-    Theta : operator or ndarray
-        Sensing matrix or operator (should support .times and .trans)
-    x0 : npt.NDArray[np.float64], optional
-        Initial guess for the solution.
+        Measurements (shape: (m,) or (m, n_signals)).
+    Theta : npt.NDArray[np.float64]
+        Sensing matrix (shape: (m, n)).
 
     Returns
     -------
-    alpha : npt.NDArray[np.float64]
-        Solution coefficients (shape: (n,) or (n, n_signals))
+    npt.NDArray[np.float64]
+        Reconstructed sparse coefficients (shape: (n,) or (n, n_signals)).
     """
-    # If Theta is a numpy array, wrap it as a cr-sparse operator
-    Theta_op = lop.matrix(Theta)
-    options = crspgl1.SPGL1Options(max_iters=self.max_iter)
-
     if Y.ndim == 1:
-      Y = Y[:, np.newaxis]  # type: ignore
+      Y = Y[:, np.newaxis]  # Ensure Y is 2D for multiple signals.
 
     S = []
     for y in Y.T:
       sigma = self.sigma_factor * np.linalg.norm(y)
-      sol = crspgl1.solve_bpic_jit(Theta_op, y, sigma, options)
-      S.append(sol.x)
+      # Solve Basis Pursuit problem
+      x, _, _, _ = spgl1.spg_bpdn(Theta, y, sigma=sigma, iter_lim=self.max_iter)
+      S.append(x)
 
     return np.array(S).T
