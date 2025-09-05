@@ -1,6 +1,8 @@
 import glob
 import os
+import pickle
 from abc import ABC, abstractmethod
+from collections.abc import Generator
 from dataclasses import dataclass, field
 
 import mne
@@ -10,66 +12,54 @@ import scipy.io as sio
 from scipy.signal import resample
 
 
-@dataclass
+@dataclass()
 class Loader(ABC):
   """
   Abstract class for data loaders.
   This class defines the interface for loading datasets.
   """
 
-  # Number of blocks of segments in the dataset
-  n_blocks: int
-  segment_length_sec: float
+  segment_length_s: float
   max_blocks_per_file_per_run: int | None = None
-  root_dir: str | None = None
   random_state: int = 42
+  root_dir: str | None = None
 
+  _current_file_path: str | None = field(init=False, default=None)
   _dataset: str = field(init=False)
   _fs: float = field(init=False)
-  _ch_names: list[str] = field(init=False, default_factory=list)
-
-  # (n_blocks, n_samples, n_channels)
-  _data: npt.NDArray[np.float64] = field(
-    init=False, default_factory=lambda: np.array([], dtype=np.float64)
-  )
-
+  _ch_names: list[str] = field(init=False, default_factory=list)  # type: ignore
   _n_samples: int = field(init=False)
   _n_channels: int = field(init=False)
+  _file_paths: list[str] = field(init=False, default_factory=list)  # type: ignore
+  _available_possible_starts_by_file: dict[str, list[int] | None] = field(  # type: ignore
+    init=False, default_factory=dict
+  )
 
   def __post_init__(self) -> None:
     self._load_metadata()
-    self._load_data()
+    self._file_paths = self._load_file_paths()
+    self._available_possible_starts_by_file: dict[str, list[int] | None] = (
+      dict.fromkeys(self._file_paths, None)
+    )
+    self._n_samples = int(self.segment_length_s * self._fs)
 
-  def _load_data(self) -> None:
-    file_paths = self._load_file_paths()
-    n_samples_per_segment = int(self.segment_length_sec * self._fs)
-    blocks = self._select_blocks(file_paths, n_samples_per_segment)
+  def blocks_generator(
+    self, downsampled_fs: int | None = None
+  ) -> Generator[tuple[npt.NDArray[np.float64], int, str], None, None]:
+    n_samples = (
+      self.get_downsampled_n_samples(downsampled_fs)
+      if downsampled_fs is not None
+      else self.n_samples
+    )
 
-    if len(blocks) < self.n_blocks:
-      error_msg = (
-        f"Requested {self.n_blocks} blocks, but only {len(blocks)} were loaded."
-      )
-      raise ValueError(error_msg)
-
-    # Shape (n_blocks, n_samples_per_segment, n_channels)
-    self._data = np.array(blocks)
-    self._n_samples = n_samples_per_segment
-
-  def _select_blocks(
-    self, file_paths: list[str], n_samples_per_segment: int
-  ) -> list[npt.NDArray[np.float64]]:
     rng = np.random.default_rng(self.random_state)
 
-    available_possible_starts_by_file: dict[str, list[int] | None] = dict.fromkeys(
-      file_paths, None
-    )
-    blocks: list[npt.NDArray[np.float64]] = []
+    while self.has_available_blocks():
+      rng.shuffle(self.file_paths)
 
-    while len(blocks) < self.n_blocks:
-      rng.shuffle(file_paths)
-
-      for file_path in file_paths:
-        possible_starts = available_possible_starts_by_file[file_path]
+      for file_path in self.file_paths:
+        self._current_file_path = file_path
+        possible_starts = self._available_possible_starts_by_file[file_path]
 
         areAllSegmentsIncluded = (
           possible_starts is not None and len(possible_starts) == 0
@@ -81,36 +71,67 @@ class Loader(ABC):
         if data is None:
           continue
 
-        max_start_idx = data.shape[0] - n_samples_per_segment
+        max_start_idx = data.shape[0] - n_samples
         if max_start_idx <= 0:
-          error_msg = f"Not enough data in {file_path} for segment length {self.segment_length_sec} seconds."
+          error_msg = f"Not enough data in {file_path} for segment length {self.segment_length_s} seconds."  # noqa: E501
           raise ValueError(error_msg)
 
         if possible_starts is None:
-          possible_starts = np.arange(0, max_start_idx, n_samples_per_segment)
-          rng.shuffle(possible_starts)
+          n_starts = max_start_idx // n_samples + 1
+          possible_starts = (n_samples * rng.permutation(n_starts)).tolist()
 
         added_blocks_count = 0
-        while possible_starts.size > 0:
-          start, possible_starts = possible_starts[0], np.delete(possible_starts, 0)
-          end = start + n_samples_per_segment
-
+        max_blocks = self.max_blocks_per_file_per_run or len(possible_starts) or 0
+        for start in possible_starts:
+          end = start + n_samples
           block = data[start:end, :]
-          blocks.append(block)
+          if downsampled_fs is not None:
+            block = resample(block, n_samples)
 
-          if len(blocks) == self.n_blocks:
-            return blocks
+          yield (block, start, self._current_file_path)
 
           added_blocks_count += 1
-          if (
-            self.max_blocks_per_file_per_run is not None
-            and added_blocks_count == self.max_blocks_per_file_per_run
-          ):
+          if added_blocks_count == max_blocks:
             break
 
-        available_possible_starts_by_file[file_path] = possible_starts
+        self._available_possible_starts_by_file[file_path] = possible_starts[
+          added_blocks_count:
+        ]
 
-    return blocks
+  def has_available_blocks(self) -> bool:
+    return any(
+      possible_starts is None or len(possible_starts) > 0
+      for possible_starts in self._available_possible_starts_by_file.values()
+    )
+
+  def get_downsampled_n_samples(self, downsampled_fs: float) -> int:
+    if downsampled_fs == self.fs:
+      return self.n_samples
+    if downsampled_fs > self.fs:
+      error_msg = (
+        "New sampling frequency must be less than the current sampling frequency."
+      )
+      raise ValueError(error_msg)
+    if downsampled_fs <= 0:
+      error_msg = "New sampling frequency must be positive."
+      raise ValueError(error_msg)
+
+    return int(np.round(self.n_samples * downsampled_fs / self.fs))
+
+  def save(self, file_path: str) -> None:
+    with open(file_path, "wb") as f:
+      pickle.dump(self, f)
+
+  @classmethod
+  def load(cls, file_path: str) -> "Loader":
+    obj = None
+    with open(file_path, "rb") as f:
+      obj = pickle.load(f)
+
+    if not isinstance(obj, cls):
+      raise TypeError(f"Loaded object is not of type {cls.__name__}")
+
+    return obj
 
   @abstractmethod
   def _load_metadata(self) -> None: ...
@@ -120,56 +141,6 @@ class Loader(ABC):
 
   @abstractmethod
   def _load_file_paths(self) -> list[str]: ...
-
-  def get_random_segments(
-    self, n_segments: int, random_state: int = 42
-  ) -> npt.NDArray[np.float64]:
-    """
-    Returns a list of individual segments randomly selected from the dataset.
-    """
-    rng = np.random.default_rng(random_state)
-
-    total_n_segments = self.n_blocks * self.n_channels
-
-    if n_segments > total_n_segments:
-      error_msg = (
-        f"Requested {n_segments} segments, but only {total_n_segments} available."
-      )
-      raise ValueError(error_msg)
-
-    indices = rng.choice(total_n_segments, size=n_segments, replace=False)
-
-    segments: list[npt.NDArray[np.float64]] = []
-    for idx in indices:
-      block_idx = idx // self.n_channels
-      channel_idx = idx % self.n_channels
-      segments.append(self._data[block_idx, :, channel_idx])
-
-    return np.array(segments).T
-
-  def downsample(self, new_fs: float) -> None:
-    """
-    Resample the data to a new sampling frequency.
-    Assumes self._data has shape (n_blocks, n_samples, n_channels).
-    """
-    error_msg: str = ""
-
-    if self._fs == new_fs:
-      return
-    if new_fs > self._fs:
-      error_msg = (
-        "New sampling frequency must be less than the current sampling frequency."
-      )
-      raise ValueError(error_msg)
-    if new_fs <= 0:
-      error_msg = "New sampling frequency must be positive."
-      raise ValueError(error_msg)
-
-    new_n_samples = int(np.round(self.n_samples * new_fs / self._fs))
-    # Resample each block independently along the samples axis
-    self._data = resample(self._data, new_n_samples, axis=1)
-    self._n_samples = new_n_samples
-    self._fs = new_fs
 
   @property
   def dataset(self) -> str:
@@ -184,10 +155,6 @@ class Loader(ABC):
     return self._ch_names
 
   @property
-  def data(self) -> npt.NDArray[np.float64]:
-    return self._data
-
-  @property
   def n_samples(self) -> int:
     return self._n_samples
 
@@ -196,20 +163,12 @@ class Loader(ABC):
     return self._n_channels
 
   @property
-  def n_blocks(self) -> int:
-    return self._n_blocks
-
-  @n_blocks.setter
-  def n_blocks(self, n_blocks: int) -> None:
-    self._n_blocks = n_blocks
+  def file_paths(self) -> list[str]:
+    return self._file_paths
 
   @property
-  def segment_length_sec(self) -> float:
-    return self._segment_length_sec
-
-  @segment_length_sec.setter
-  def segment_length_sec(self, segment_length_sec: int) -> None:
-    self._segment_length_sec = segment_length_sec
+  def current_file_path(self) -> str | None:
+    return self._current_file_path
 
 
 @dataclass
@@ -406,21 +365,30 @@ class BCIIIILoader(Loader):
 
 if __name__ == "__main__":
   loader = CHBMITLoader(
-    n_blocks=10, segment_length_sec=4, max_blocks_per_file_per_run=1
+    max_blocks_per_file_per_run=10, segment_length_s=4, random_state=42
   )
-  loader = BCIIVLoader(n_blocks=10, segment_length_sec=4, max_blocks_per_file_per_run=1)
-  loader = BCIIIILoader(
-    n_blocks=10, segment_length_sec=4, max_blocks_per_file_per_run=1
-  )
-  # loader = BCIIVLoader(n_blocks=1000, segment_length_sec=4.0)
+
+  # folder_path = "./files/processed"
+  # file_path = os.path.join(
+  #   folder_path,
+  #   "test.pkl",
+  # )
+  # with open(file_path, "wb") as f:
+  #   pickle.dump(loader.available_possible_starts_by_file, f)
+
+  # loader = BCIIVLoader(n_blocks=10, segment_length_s=4, max_blocks_per_file_per_run=1)
+  # loader = BCIIIILoader(
+  #   n_blocks=10, segment_length_s=4, max_blocks_per_file_per_run=1
+  # )
+  # loader = BCIIVLoader(n_blocks=1000, segment_length_s=4.0)
   # loader = CHBMITLoader.load(f"./files/processed/1748879687102909305_chbmit_fs_128_blocks_11200.pkl")
 
   # loader.downsample(new_fs=128.0)  # Resample to 128 Hz
 
-  print(
-    f"Loaded {loader.n_blocks} blocks with {loader.n_samples} samples and {loader.n_channels} channels each."
-  )
-  print(f"Sampling frequency: {loader.fs} Hz")
-  print(f"Channel names: {loader.ch_names}")
-  print(f"Data shape: {loader.data.shape}")
+  # print(
+  #   f"Loaded {loader.n_blocks} blocks with {loader.n_samples} samples and {loader.n_channels} channels each."
+  # )
+  # print(f"Sampling frequency: {loader.fs} Hz")
+  # print(f"Channel names: {loader.ch_names}")
+  # print(f"Data shape: {loader.data.shape}")
   # print(loader.get_random_segments(n_segments=10).shape)

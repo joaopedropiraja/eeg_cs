@@ -1,8 +1,7 @@
 import glob
 import os
-import pickle
-import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 
 import mne
 import numpy as np
@@ -11,582 +10,430 @@ import scipy.io as sio
 from scipy.signal import resample
 
 
+@dataclass
 class Loader(ABC):
-    """
-    Abstract class for data loaders.
-    This class defines the interface for loading datasets.
-    """
+  """
+  Abstract class for data loaders.
+  This class defines the interface for loading datasets.
+  """
 
-    _id: int = time.time_ns()  # Unique identifier for the loader instance
-    _dataset: str
-    _fs: float
-    _ch_names: list[str]
-    _data: npt.NDArray[np.float32]  # (n_blocks, n_samples, n_channels)
-    _n_samples: int
-    _n_channels: int
-    # Number of blocks of segments in the dataset
-    _n_blocks: int
-    _segment_length_sec: float
+  # Number of blocks of segments in the dataset
+  n_blocks: int
+  segment_length_sec: float
+  max_blocks_per_file_per_run: int | None = None
+  root_dir: str | None = None
+  random_state: int = 42
 
-    def __init__(
-        self, n_blocks: int, segment_length_sec: float, random_state: int = 42
-    ) -> None:
-        self._n_blocks = n_blocks
-        self._segment_length_sec = segment_length_sec
+  _dataset: str = field(init=False)
+  _fs: float = field(init=False)
+  _ch_names: list[str] = field(init=False, default_factory=list)
 
-        self._load_data(n_blocks, segment_length_sec, random_state)
+  # (n_blocks, n_samples, n_channels)
+  _data: npt.NDArray[np.float64] = field(
+    init=False, default_factory=lambda: np.array([], dtype=np.float64)
+  )
 
-    @abstractmethod
-    def _load_data(
-        self, n_blocks: int, segment_length_sec: float, random_state: int
-    ) -> None: ...
+  _n_samples: int = field(init=False)
+  _n_channels: int = field(init=False)
 
-    def get_random_segments(
-        self, n_segments: int, random_state: int = 42
-    ) -> npt.NDArray[np.float32]:
-        """
-        Returns a list of individual segments randomly selected from the dataset.
-        """
-        rng = np.random.default_rng(random_state)
+  available_possible_starts_by_file: dict[str, list[int] | None] = field(
+    init=False, default_factory=dict
+  )
 
-        total_n_segments = self.n_blocks * self.n_channels
+  def __post_init__(self) -> None:
+    self._load_metadata()
+    self._load_data()
 
-        if n_segments > total_n_segments:
-            raise ValueError(
-                f"Requested {n_segments} segments, but only {total_n_segments} available."
-            )
+  def _load_data(self) -> None:
+    file_paths = self._load_file_paths()
+    n_samples_per_segment = int(self.segment_length_sec * self._fs)
+    blocks = self._select_blocks(file_paths, n_samples_per_segment)
 
-        # Generate random indices for blocks and channels
-        indices = rng.choice(total_n_segments, size=n_segments, replace=False)
+    if len(blocks) < self.n_blocks:
+      error_msg = (
+        f"Requested {self.n_blocks} blocks, but only {len(blocks)} were loaded."
+      )
+      raise ValueError(error_msg)
 
-        # Map indices to block and channel
-        segments: list[npt.NDArray[np.float32]] = []
-        for idx in indices:
-            block_idx = idx // self.n_channels
-            channel_idx = idx % self.n_channels
-            segments.append(self._data[block_idx, :, channel_idx])
+    # Shape (n_blocks, n_samples_per_segment, n_channels)
+    self._data = np.array(blocks)
+    self._n_samples = n_samples_per_segment
 
-        return np.array(segments).T
+  def _select_blocks(
+    self, file_paths: list[str], n_samples_per_segment: int
+  ) -> list[npt.NDArray[np.float64]]:
+    rng = np.random.default_rng(self.random_state)
 
-    # def split_training_and_test(
-    #     self, n_blocks: int, flatten: bool = False, remove_mean: bool = False
-    # ) -> tuple[np.ndarray, np.ndarray]:
-    #     """
-    #     Split the dataset into training and test sets.
-    #     The first n_blocks are used for training, and the rest for testing.
+    self.available_possible_starts_by_file: dict[str, list[int] | None] = dict.fromkeys(
+      file_paths, None
+    )
+    blocks: list[npt.NDArray[np.float64]] = []
 
-    #     Parameters
-    #     ----------
-    #     n_blocks : int
-    #         Number of blocks to use for training.
-    #     flatten : bool
-    #         If True, flatten the training data to shape (n_samples, n_blocks * n_channels).
-    #     remove_mean : bool
-    #         If True, remove the mean value from each channel in each block of the training data.
+    while len(blocks) < self.n_blocks:
+      rng.shuffle(file_paths)
 
-    #     Returns
-    #     -------
-    #     training_data : np.ndarray
-    #         If flatten=False, shape is (n_blocks, n_samples, n_channels).
-    #         If flatten=True, shape is (n_samples, n_blocks * n_channels).
-    #     test_data : np.ndarray
-    #         Shape is (remaining_blocks, n_samples, n_channels).
-    #     """
-    #     if n_blocks > self.n_blocks:
-    #         raise ValueError(
-    #             f"Requested {n_blocks} blocks, but only {self.n_blocks} available."
-    #         )
-    #     if n_blocks <= 0:
-    #         raise ValueError("Number of blocks must be positive.")
+      for file_path in file_paths:
+        possible_starts = self.available_possible_starts_by_file[file_path]
 
-    #     # Select the first n_blocks for training and the rest for testing
-    #     training_data = self._data[
-    #         :n_blocks
-    #     ]  # shape: (n_blocks, n_samples, n_channels)
-    #     test_data = self._data[
-    #         n_blocks:
-    #     ]  # shape: (remaining_blocks, n_samples, n_channels)
-
-    #     # Work on a copy so we don't alter the original dataset
-    #     training_data = training_data.copy()
-
-    #     # If requested, remove the mean from each channel in each block
-    #     if remove_mean:
-    #         # Subtract mean over samples for each (block, channel)
-    #         # training_data has shape (n_blocks, n_samples, n_channels)
-    #         means = training_data.mean(
-    #             axis=1, keepdims=True
-    #         )  # (n_blocks, 1, n_channels)
-    #         training_data = training_data - means
-
-    #     if flatten:
-    #         # We want shape (n_samples, n_blocks * n_channels).
-    #         # Current training_data is (n_blocks, n_samples, n_channels).
-    #         # First transpose to (n_samples, n_blocks, n_channels), then reshape.
-    #         segments = []
-    #         for block_idx in range(n_blocks):
-    #             for channel_idx in range(self.n_channels):
-    #                 segment = training_data[block_idx, :, channel_idx]
-    #                 segments.append(segment)
-
-    #         training_data = np.array(segments).T
-    #         # n_samples = self.n_samples
-    #         # n_channels = self.n_channels
-    #         # training_data = training_data.transpose(1, 0, 2)  # (n_samples, n_blocks, n_channels)
-    #         # training_data = training_data.reshape(n_samples, n_blocks * n_channels)
-
-    #     return training_data, test_data
-
-    def downsample(self, new_fs: float) -> None:
-        """
-        Resample the data to a new sampling frequency.
-        Assumes self._data has shape (n_blocks, n_samples, n_channels).
-        """
-        if self._fs == new_fs:
-            return
-        if new_fs > self._fs:
-            raise ValueError(
-                "New sampling frequency must be less than the current sampling frequency."
-            )
-        if new_fs <= 0:
-            raise ValueError("New sampling frequency must be positive.")
-
-        new_n_samples = int(np.round(self.n_samples * new_fs / self._fs))
-        # Resample each block independently along the samples axis
-        self._data = resample(self._data, new_n_samples, axis=1)
-        self._n_samples = new_n_samples
-        self._fs = new_fs
-
-    @classmethod
-    def load(cls, file_path: str) -> "Loader":
-        """
-        Load data from a file.
-        This method should be implemented by subclasses.
-        """
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"File {file_path} does not exist.")
-
-        with open(file_path, "rb") as f:
-            obj = pickle.load(f)
-            if not isinstance(obj, cls):
-                raise TypeError(
-                    f"Expected object of type {cls.__name__}, got {type(obj).__name__}."
-                )
-
-            return obj
-
-    def save(self, folder_path: str) -> None:
-        file_path = os.path.join(
-            folder_path,
-            f"{self.id}_{self.dataset}_fs_{self.fs}_blocks_{self.n_blocks}.pkl",
+        areAllSegmentsIncluded = (
+          possible_starts is not None and len(possible_starts) == 0
         )
-        with open(file_path, "wb") as f:
-            pickle.dump(self, f)
+        if areAllSegmentsIncluded:
+          continue
 
-    @property
-    def id(self) -> int:
-        return self._id
+        data = self._load_file_data(file_path)
+        if data is None:
+          continue
 
-    @property
-    def dataset(self) -> str:
-        return self._dataset
+        max_start_idx = data.shape[0] - n_samples_per_segment
+        if max_start_idx <= 0:
+          error_msg = f"Not enough data in {file_path} for segment length {self.segment_length_sec} seconds."
+          raise ValueError(error_msg)
 
-    @property
-    def fs(self) -> float:
-        return self._fs
+        if possible_starts is None:
+          possible_starts = np.arange(0, max_start_idx, n_samples_per_segment)
+          rng.shuffle(possible_starts)
 
-    @property
-    def ch_names(self) -> list[str]:
-        return self._ch_names
+        added_blocks_count = 0
+        while possible_starts.size > 0:
+          start, possible_starts = possible_starts[0], np.delete(possible_starts, 0)
+          end = start + n_samples_per_segment
 
-    @property
-    def data(self) -> npt.NDArray[np.float32]:
-        return self._data
+          block = data[start:end, :]
+          blocks.append(block)
 
-    @property
-    def n_samples(self) -> int:
-        return self._n_samples
+          if len(blocks) == self.n_blocks:
+            return blocks
 
-    @property
-    def n_channels(self) -> int:
-        return self._n_channels
+          added_blocks_count += 1
+          if (
+            self.max_blocks_per_file_per_run is not None
+            and added_blocks_count == self.max_blocks_per_file_per_run
+          ):
+            break
 
-    @property
-    def n_blocks(self) -> int:
-        return self._n_blocks
+        self.available_possible_starts_by_file[file_path] = possible_starts
 
-    @property
-    def segment_length_sec(self) -> float:
-        return self._segment_length_sec
+    return blocks
+
+  @abstractmethod
+  def _load_metadata(self) -> None: ...
+
+  @abstractmethod
+  def _load_file_data(self, file_path: str) -> npt.NDArray[np.float64] | None: ...
+
+  @abstractmethod
+  def _load_file_paths(self) -> list[str]: ...
+
+  def get_random_segments(
+    self, n_segments: int, random_state: int = 42
+  ) -> npt.NDArray[np.float64]:
+    """
+    Returns a list of individual segments randomly selected from the dataset.
+    """
+    rng = np.random.default_rng(random_state)
+
+    total_n_segments = self.n_blocks * self.n_channels
+
+    if n_segments > total_n_segments:
+      error_msg = (
+        f"Requested {n_segments} segments, but only {total_n_segments} available."
+      )
+      raise ValueError(error_msg)
+
+    indices = rng.choice(total_n_segments, size=n_segments, replace=False)
+
+    segments: list[npt.NDArray[np.float64]] = []
+    for idx in indices:
+      block_idx = idx // self.n_channels
+      channel_idx = idx % self.n_channels
+      segments.append(self._data[block_idx, :, channel_idx])
+
+    return np.array(segments).T
+
+  def downsample(self, new_fs: float) -> None:
+    """
+    Resample the data to a new sampling frequency.
+    Assumes self._data has shape (n_blocks, n_samples, n_channels).
+    """
+    error_msg: str = ""
+
+    if self._fs == new_fs:
+      return
+    if new_fs > self._fs:
+      error_msg = (
+        "New sampling frequency must be less than the current sampling frequency."
+      )
+      raise ValueError(error_msg)
+    if new_fs <= 0:
+      error_msg = "New sampling frequency must be positive."
+      raise ValueError(error_msg)
+
+    new_n_samples = int(np.round(self.n_samples * new_fs / self._fs))
+    # Resample each block independently along the samples axis
+    self._data = resample(self._data, new_n_samples, axis=1)
+    self._n_samples = new_n_samples
+    self._fs = new_fs
+
+  @property
+  def dataset(self) -> str:
+    return self._dataset
+
+  @property
+  def fs(self) -> float:
+    return self._fs
+
+  @property
+  def ch_names(self) -> list[str]:
+    return self._ch_names
+
+  @property
+  def data(self) -> npt.NDArray[np.float64]:
+    return self._data
+
+  @property
+  def n_samples(self) -> int:
+    return self._n_samples
+
+  @property
+  def n_channels(self) -> int:
+    return self._n_channels
+
+  @property
+  def n_blocks(self) -> int:
+    return self._n_blocks
+
+  @n_blocks.setter
+  def n_blocks(self, n_blocks: int) -> None:
+    self._n_blocks = n_blocks
+
+  @property
+  def segment_length_sec(self) -> float:
+    return self._segment_length_sec
+
+  @segment_length_sec.setter
+  def segment_length_sec(self, segment_length_sec: int) -> None:
+    self._segment_length_sec = segment_length_sec
 
 
+@dataclass
 class CHBMITLoader(Loader):
-    """
-    Loader for CHB-MIT Scalp EEG Database.
-    """
+  """
+  Loader for CHB-MIT Scalp EEG Database.
+  """
 
-    _dataset = "chbmit"
-    _fs = 256.0  # Default sampling frequency for CHB-MIT
-    _ch_names = [
-        "FP1-F7",
-        "F7-T7",
-        "T7-P7",
-        "P7-O1",
-        "FP1-F3",
-        "F3-C3",
-        "C3-P3",
-        "P3-O1",
-        "FP2-F4",
-        "F4-C4",
-        "C4-P4",
-        "P4-O2",
-        "FP2-F8",
-        "F8-T8",
-        "T8-P8",
-        "P8-O2",
-        "FZ-CZ",
-        "CZ-PZ",
-        "P7-T7",
-        "T7-FT9",
-        "FT9-FT10",
-        "FT10-T8",
+  def _load_metadata(self) -> None:
+    self._dataset = "chbmit"
+    self._fs = 256.0
+    self._ch_names = [
+      "FP1-F7",
+      "F7-T7",
+      "T7-P7",
+      "P7-O1",
+      "FP1-F3",
+      "F3-C3",
+      "C3-P3",
+      "P3-O1",
+      "FP2-F4",
+      "F4-C4",
+      "C4-P4",
+      "P4-O2",
+      "FP2-F8",
+      "F8-T8",
+      "T8-P8",
+      "P8-O2",
+      "FZ-CZ",
+      "CZ-PZ",
+      "P7-T7",
+      "T7-FT9",
+      "FT9-FT10",
+      "FT10-T8",
     ]
-    _n_channels = len(_ch_names)
+    self._n_channels = len(self.ch_names)
+    self._n_samples = 5
+    if self.root_dir is None:
+      self.root_dir = "/home/jplp/Disco X/UFMG/2025/TCC/Códigos/eeg_cs/files/CHBMIT"
 
-    def _load_data(self, n_blocks: int, segment_length_sec: float, random_state: int):
-        """
-        Load EEG data from the CHB-MIT dataset.
+  def _load_file_data(self, file_path: str) -> npt.NDArray[np.float64] | None:
+    raw = mne.io.read_raw_edf(file_path, include=self.ch_names, verbose=False)
+    if len(raw.info["ch_names"]) == 0:
+      return None
 
-        Parameters
-        ----------
-        n_blocks : int
-            Number of blocks to load.
-        segment_length_sec : float
-            Length of each segment in seconds.
-        random_state : int
-            Random seed for reproducibility.
-        """
-        rng = np.random.default_rng(random_state)
-        root_dir = "/home/jplp/Disco X/UFMG/2025/TCC/Códigos/eeg_cs/files/CHBMIT"
-        # root_dir = f"./../files/CHBMIT"
-        edf_files = sorted(glob.glob(os.path.join(root_dir, "chb*/", "*.edf")))
-        if not edf_files:
-            raise FileNotFoundError(f"No EDF files found in {root_dir}.")
+    # (n_samples, n_channels)
+    data = raw.get_data().T[:, :-1]
 
-        n_samples_per_segment = int(segment_length_sec * self._fs)
-        blocks: list[npt.NDArray[np.float32]] = []
+    data_n_channels = data.shape[1]
+    if data_n_channels != self.n_channels:
+      return None
 
-        # Keep track of the last used index for each EDF file
-        used_indice: dict[str, int | None] = dict.fromkeys(edf_files)
-        max_blocks_per_file = max(1, n_blocks // 10)
+    return data
 
-        while len(blocks) < n_blocks:
-            old_blocks_count = len(blocks)
-            rng.shuffle(edf_files)
+  def _load_file_paths(self) -> list[str]:
+    edf_file_paths = sorted(glob.glob(os.path.join(self.root_dir, "chb*/", "*.edf")))
+    if not edf_file_paths:
+      error_msg = f"No EDF files found in {self.root_dir}."
+      raise FileNotFoundError(error_msg)
 
-            for edf_file in edf_files:
-                areAllSegmentsIncluded = used_indice[edf_file] == 0
-                if areAllSegmentsIncluded:
-                    continue
-
-                raw = mne.io.read_raw_edf(
-                    edf_file, include=self.ch_names, verbose=False
-                )
-                if len(raw.info["ch_names"]) == 0:
-                    continue
-
-                data = raw.get_data().T[:, :-1]  # (n_samples, n_channels)
-
-                data_n_channels = data.shape[1]
-                if data_n_channels != self.n_channels:
-                    continue
-
-                max_start_idx = data.shape[0] - n_samples_per_segment
-                if max_start_idx <= 0:
-                    raise ValueError(
-                        f"Not enough data in {edf_file} for segment length {segment_length_sec} seconds."
-                    )
-
-                end_idx = (
-                    used_indice[edf_file]
-                    if used_indice[edf_file] is not None
-                    else max_start_idx + 1
-                )
-                possible_starts: np.ndarray = np.arange(
-                    0, end_idx, n_samples_per_segment
-                )
-
-                initial_idx = rng.choice(possible_starts.size)
-                used_indice[edf_file] = initial_idx
-
-                # Skip if the initial index is 0, as it would not yield new blocks
-                if initial_idx == 0:
-                    continue
-
-                added_blocks_count = 0
-                for start in possible_starts[initial_idx:]:
-                    end = start + n_samples_per_segment
-                    block = data[start:end, :]
-                    blocks.append(block)
-                    added_blocks_count += 1
-
-                    if (
-                        len(blocks) == n_blocks
-                        or added_blocks_count == max_blocks_per_file
-                    ):
-                        break
-
-                if len(blocks) == n_blocks:
-                    break
-
-            # If no new blocks were added in this pass, break to avoid infinite loop
-            if len(blocks) == old_blocks_count:
-                break
-
-        if len(blocks) < n_blocks:
-            raise ValueError(
-                f"Requested {n_blocks} blocks, but only {len(blocks)} were loaded."
-            )
-
-        self._data = np.array(
-            blocks
-        )  # Shape (n_blocks, n_samples_per_segment, n_channels)
-        self._n_samples = n_samples_per_segment
+    return edf_file_paths
 
 
+@dataclass
 class BCIIVLoader(Loader):
-    """
-    Loader for BCI IV dataset I.
-    """
+  """
+  Loader for BCI IV dataset I.
+  """
 
-    _dataset = "bciiv_1"
-    _fs = 1000.0  # Default sampling frequency for BCI IV dataset I
+  def _load_metadata(self) -> None:
+    self._dataset = "bciiv_1"
+    self._fs = 1000.0
+    if self.root_dir is None:
+      self.root_dir = "/home/jplp/Disco X/UFMG/2025/TCC/Códigos/eeg_cs/files/BCIIV_1"
 
-    def _load_data(self, n_blocks: int, segment_length_sec: float, random_state: int):
-        rng = np.random.default_rng(random_state)
-        root_dir = "/home/jplp/Disco X/UFMG/2025/TCC/Códigos/eeg_cs/files/BCIIV_1"
-        mat_files = sorted(glob.glob(os.path.join(root_dir, "*.mat")))
-        if not mat_files:
-            raise FileNotFoundError(f"No .mat files found in {root_dir}.")
+  def _load_file_data(self, file_path: str) -> npt.NDArray[np.float64] | None:
+    mat_data = sio.loadmat(file_path, squeeze_me=True, struct_as_record=False)
+    self._ch_names = mat_data["nfo"].clab
+    self._n_channels = len(self._ch_names)
 
-        n_samples_per_segment = int(segment_length_sec * self._fs)
-        blocks: list[np.ndarray] = []
+    # INT16 to V
+    # shape: (samples, channels)
+    return 1e-7 * np.array(mat_data["cnt"], dtype=np.float64)
 
-        # Keep track of the last used index for each Mat file
-        used_indice: dict[str, int | None] = dict.fromkeys(mat_files)
+  def _load_file_paths(self) -> list[str]:
+    mat_file_paths = sorted(glob.glob(os.path.join(self.root_dir, "*.mat")))
+    if not mat_file_paths:
+      error_msg = f"No .mat files found in {self.root_dir}."
+      raise FileNotFoundError(error_msg)
 
-        while len(blocks) < n_blocks:
-            old_blocks_count = len(blocks)
-            rng.shuffle(mat_files)
-
-            for mat_file in mat_files:
-                areAllSegmentsIncluded = used_indice[mat_file] == 0
-                if areAllSegmentsIncluded:
-                    continue
-
-                mat_data = sio.loadmat(
-                    mat_file, squeeze_me=True, struct_as_record=False
-                )
-                self._ch_names = mat_data["nfo"].clab
-                self._n_channels = len(self._ch_names)
-
-                # INT16 to V
-                data = 1e-7 * np.array(
-                    mat_data["cnt"], dtype=np.double
-                )  # shape: (samples, channels)
-
-                max_start_idx = data.shape[0] - n_samples_per_segment
-                if max_start_idx <= 0:
-                    raise ValueError(
-                        f"Not enough data in {mat_file} for segment length {segment_length_sec} seconds."
-                    )
-
-                end_idx = (
-                    used_indice[mat_file]
-                    if used_indice[mat_file] is not None
-                    else max_start_idx + 1
-                )
-                possible_starts: np.ndarray = np.arange(
-                    0, end_idx, n_samples_per_segment
-                )
-
-                initial_idx = rng.choice(possible_starts.size)
-                used_indice[mat_file] = initial_idx
-
-                # Skip if the initial index is 0, as it would not yield new blocks
-                if initial_idx == 0:
-                    continue
-
-                for start in possible_starts[initial_idx:]:
-                    end = start + n_samples_per_segment
-                    block = data[start:end, :]
-                    blocks.append(block)
-
-                    if len(blocks) == n_blocks:
-                        break
-
-                if len(blocks) == n_blocks:
-                    break
-
-            # If no new blocks were added in this pass, break to avoid infinite loop
-            if len(blocks) == old_blocks_count:
-                break
-
-        if len(blocks) < n_blocks:
-            raise ValueError(
-                f"Requested {n_blocks} blocks, but only {len(blocks)} were loaded."
-            )
-
-        self._data = np.array(
-            blocks
-        )  # Shape (n_blocks, n_samples_per_segment, n_channels)
-        self._n_samples = n_samples_per_segment
+    return mat_file_paths
 
 
 class BCIIIILoader(Loader):
-    """
-    Loader for BCI III dataset II.
-    """
+  """
+  Loader for BCI III dataset II.
+  """
 
-    _dataset = "bciiii_2"
-    _fs = 240.0  # Default sampling frequency for BCI III dataset II
-    _ch_names = [
-        "FC5",
-        "FC3",
-        "FC1",
-        "FCz",
-        "FC2",
-        "FC4",
-        "FC6",
-        "C5",
-        "C3",
-        "C1",
-        "Cz",
-        "C2",
-        "C4",
-        "C6",
-        "CP5",
-        "CP3",
-        "CP1",
-        "CPz",
-        "CP2",
-        "CP4",
-        "CP6",
-        "Fp1",
-        "Fpz",
-        "Fp2",
-        "AF7",
-        "AF3",
-        "AFz",
-        "AF4",
-        "AF8",
-        "F7",
-        "F5",
-        "F3",
-        "F1",
-        "Fz",
-        "F2",
-        "F4",
-        "F6",
-        "F8",
-        "FT7",
-        "FT8",
-        "T7",
-        "T8",
-        "T9",
-        "T10",
-        "TP7",
-        "TP8",
-        "P7",
-        "P5",
-        "P3",
-        "P1",
-        "Pz",
-        "P2",
-        "P4",
-        "P6",
-        "P8",
-        "PO7",
-        "PO3",
-        "POz",
-        "PO4",
-        "PO8",
-        "O1",
-        "Oz",
-        "O2",
-        "Iz",
+  def _load_metadata(self) -> None:
+    self._dataset = "bciiii_2"
+    self._fs = 240.0
+    self._ch_names = [
+      "FC5",
+      "FC3",
+      "FC1",
+      "FCz",
+      "FC2",
+      "FC4",
+      "FC6",
+      "C5",
+      "C3",
+      "C1",
+      "Cz",
+      "C2",
+      "C4",
+      "C6",
+      "CP5",
+      "CP3",
+      "CP1",
+      "CPz",
+      "CP2",
+      "CP4",
+      "CP6",
+      "Fp1",
+      "Fpz",
+      "Fp2",
+      "AF7",
+      "AF3",
+      "AFz",
+      "AF4",
+      "AF8",
+      "F7",
+      "F5",
+      "F3",
+      "F1",
+      "Fz",
+      "F2",
+      "F4",
+      "F6",
+      "F8",
+      "FT7",
+      "FT8",
+      "T7",
+      "T8",
+      "T9",
+      "T10",
+      "TP7",
+      "TP8",
+      "P7",
+      "P5",
+      "P3",
+      "P1",
+      "Pz",
+      "P2",
+      "P4",
+      "P6",
+      "P8",
+      "PO7",
+      "PO3",
+      "POz",
+      "PO4",
+      "PO8",
+      "O1",
+      "Oz",
+      "O2",
+      "Iz",
     ]
-    _n_channels = len(_ch_names)
+    self._n_channels = len(self._ch_names)
 
-    def _load_data(self, n_blocks: int, segment_length_sec: float, random_state: int):
-        rng = np.random.default_rng(random_state)
-        root_dir = "/home/jplp/Disco X/UFMG/2025/TCC/Códigos/eeg_cs/files/BCIIII_2"
-        mat_files = sorted(glob.glob(os.path.join(root_dir, "*.mat")))
+    if self.root_dir is None:
+      self.root_dir = "/home/jplp/Disco X/UFMG/2025/TCC/Códigos/eeg_cs/files/BCIIII_2"
 
-        if not mat_files:
-            raise FileNotFoundError(f"No .mat files found in {root_dir}.")
+  def _load_file_data(self, file_path: str) -> npt.NDArray[np.float64] | None:
+    mat_data = sio.loadmat(file_path, squeeze_me=True, struct_as_record=False)
 
-        n_samples_per_segment = int(segment_length_sec * self._fs)
-        blocks: list[np.ndarray] = []
+    # Extract EEG signal: expected shape (epochs, samples, channels)
+    data = 1e-6 * mat_data["Signal"].astype(np.float64)
 
-        # Iterate over .mat files in randomized order
-        for mat_file in rng.permutation(mat_files):
-            print(mat_file)
-            mat_data = sio.loadmat(mat_file, squeeze_me=True, struct_as_record=False)
+    if data.ndim == 3:
+      epochs, samples, channels = data.shape
+      data = data.reshape(epochs * samples, channels)
 
-            # Extract EEG signal: expected shape (epochs, samples, channels)
-            signal = 1e-6 * mat_data["Signal"].astype(np.double)
-            n_epochs, total_samples, _ = signal.shape
+    return data
 
-            # Shuffle epoch order
-            epoch_indices = rng.permutation(n_epochs)
-            for epoch_idx in epoch_indices:
-                epoch_data = signal[epoch_idx, :, :]  # (samples, channels)
+  def _load_file_paths(self) -> list[str]:
+    mat_file_paths = sorted(glob.glob(os.path.join(self.root_dir, "*.mat")))
 
-                max_start_idx = total_samples - n_samples_per_segment
-                if max_start_idx < 0:
-                    continue
+    if not mat_file_paths:
+      error_msg = f"No .mat files found in {self.root_dir}."
+      raise FileNotFoundError(error_msg)
 
-                # Determine possible start indices within this epoch
-                possible_starts = np.arange(0, max_start_idx + 1, n_samples_per_segment)
-                rng.shuffle(possible_starts)
-
-                for start_idx in possible_starts:
-                    end_idx = start_idx + n_samples_per_segment
-                    segment = epoch_data[start_idx:end_idx, :]  # (samples, channels)
-                    blocks.append(segment)
-
-                    if len(blocks) == n_blocks:
-                        break
-                if len(blocks) == n_blocks:
-                    break
-            if len(blocks) == n_blocks:
-                break
-
-        if len(blocks) < n_blocks:
-            raise ValueError(
-                f"Requested {n_blocks} blocks, but only {len(blocks)} were loaded."
-            )
-
-        # Shape: (n_blocks, n_samples_per_segment, n_channels)
-        self._data = np.array(blocks)
-        self._n_samples = n_samples_per_segment
+    return mat_file_paths
 
 
 if __name__ == "__main__":
-    loader = BCIIIILoader(n_blocks=1000, segment_length_sec=4.0)
-    # loader = BCIIVLoader(n_blocks=1000, segment_length_sec=4.0)
-    # loader = CHBMITLoader(n_blocks=11200, segment_length_sec=4.0)
-    # loader = CHBMITLoader.load(f"./files/processed/1748879687102909305_chbmit_fs_128_blocks_11200.pkl")
+  loader = CHBMITLoader(
+    n_blocks=10, segment_length_sec=4, max_blocks_per_file_per_run=1
+  )
 
-    loader.downsample(new_fs=128.0)  # Resample to 128 Hz
+  # folder_path = "./files/processed"
+  # file_path = os.path.join(
+  #   folder_path,
+  #   "test.pkl",
+  # )
+  # with open(file_path, "wb") as f:
+  #   pickle.dump(loader.available_possible_starts_by_file, f)
 
-    print(
-        f"Loaded {loader.n_blocks} blocks with {loader.n_samples} samples and {loader.n_channels} channels each."
-    )
-    print(f"Sampling frequency: {loader.fs} Hz")
-    print(f"Channel names: {loader.ch_names}")
-    print(f"Data shape: {loader.data.shape}")
-    print(loader.get_random_segments(n_segments=10).shape)
+  # loader = BCIIVLoader(n_blocks=10, segment_length_sec=4, max_blocks_per_file_per_run=1)
+  # loader = BCIIIILoader(
+  #   n_blocks=10, segment_length_sec=4, max_blocks_per_file_per_run=1
+  # )
+  # loader = BCIIVLoader(n_blocks=1000, segment_length_sec=4.0)
+  # loader = CHBMITLoader.load(f"./files/processed/1748879687102909305_chbmit_fs_128_blocks_11200.pkl")
 
-    # loader.save(folder_path=f"{cwd}/../../files/processed")
+  # loader.downsample(new_fs=128.0)  # Resample to 128 Hz
+
+  # print(
+  #   f"Loaded {loader.n_blocks} blocks with {loader.n_samples} samples and {loader.n_channels} channels each."
+  # )
+  # print(f"Sampling frequency: {loader.fs} Hz")
+  # print(f"Channel names: {loader.ch_names}")
+  # print(f"Data shape: {loader.data.shape}")
+  # print(loader.get_random_segments(n_segments=10).shape)

@@ -5,7 +5,7 @@ import duckdb
 import pandas as pd
 
 from eeg_cs.models.compressed_sensing import CompressedSensing
-from eeg_cs.models.loader2 import BCIIIILoader, BCIIVLoader, CHBMITLoader, Loader
+from eeg_cs.models.loader import BCIIIILoader, BCIIVLoader, CHBMITLoader, Loader
 from eeg_cs.models.reconstruction_algorithm import (
   OrthogonalMatchingPursuit,
   SPGL1BasisPursuit2,

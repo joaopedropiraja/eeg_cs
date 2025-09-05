@@ -2,11 +2,10 @@ import time
 from multiprocessing import Pool, cpu_count
 from os import path
 
-import duckdb
 import pandas as pd
 
 from eeg_cs.models.compressed_sensing import CompressedSensing
-from eeg_cs.models.loader2 import BCIIIILoader, BCIIVLoader, CHBMITLoader, Loader
+from eeg_cs.models.loader import BCIIIILoader, BCIIVLoader, CHBMITLoader, Loader
 from eeg_cs.models.reconstruction_algorithm import (
   OrthogonalMatchingPursuit,
   SPGL1BasisPursuit2,
@@ -124,28 +123,46 @@ def sensing_matrix_test() -> None:
   print(f"Total execution time: {(time.time_ns() - start) / 1e9}")
 
 
-def agg_results(csv_path: str) -> None:
-  con = duckdb.connect(database=":memory:")
-  con.execute(f"CREATE TABLE results AS SELECT * FROM read_csv_auto('{csv_path}')")
+# def agg_results(csv_path: str) -> None:
+#   con = duckdb.connect(database=":memory:")
+#   con.execute(f"CREATE TABLE results AS SELECT * FROM read_csv_auto('{csv_path}')")
 
-  query = """
-    SELECT
-        "Sensing Matrix",
-        "Algorithm",
-        AVG("PRD") AS mean_PRD,
-        AVG("NMSE") AS mean_NMSE,
-        AVG("SNDR") AS mean_SNDR,
-        AVG("Time (s)") AS mean_Time_s
-    FROM results
-    GROUP BY "Sensing Matrix", "Algorithm"
-    ORDER BY "Sensing Matrix", "Algorithm"
-    """
+#   query = """
+#     SELECT
+#         "Sensing Matrix",
+#         "Algorithm",
+#         AVG("PRD") AS mean_PRD,
+#         AVG("NMSE") AS mean_NMSE,
+#         AVG("SNDR") AS mean_SNDR,
+#         AVG("Time (s)") AS mean_Time_s
+#     FROM results
+#     GROUP BY "Sensing Matrix", "Algorithm"
+#     ORDER BY "Sensing Matrix", "Algorithm"
+#     """
 
-  agg_df = con.execute(query).df()
-  print(agg_df)
+#   agg_df = con.execute(query).df()
+#   print(agg_df)
 
-  # Optionally, save the aggregated results
-  agg_df.to_csv(f"{csv_path.split('.')[0]}_duckdb_agg.csv", index=False)
+#   # Optionally, save the aggregated results
+#   agg_df.to_csv(f"{csv_path.split('.')[0]}_duckdb_agg.csv", index=False)
+
+
+def main() -> None:
+  n_blocks = 10
+  segment_length_sec = 4
+  max_blocks_per_file_per_run = 2
+  fs = 128
+  CR = 4
+
+  random_state = 20
+
+  loader1 = CHBMITLoader(n_blocks, segment_length_sec, max_blocks_per_file_per_run)
+  loader2 = BCIIVLoader(n_blocks, segment_length_sec, max_blocks_per_file_per_run)
+  loader3 = BCIIIILoader(n_blocks, segment_length_sec, max_blocks_per_file_per_run)
+
+  loaders = [loader1, loader2, loader3]
+  for loader in loaders:
+    loader.downsample(new_fs=fs)
 
 
 if __name__ == "__main__":
