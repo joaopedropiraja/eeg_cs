@@ -22,6 +22,9 @@ dependencies = [
     "scipy>=1.16.0",
     "scikit-misc>=0.5.1",
     "scipy-stubs>=1.16.1.1",
+    "sporco>=0.2.1",
+    "spams-bin>=2.6.13",
+    "scikit-image>=0.25.2",
 ]
 
 [dependency-groups]
@@ -98,6 +101,7 @@ exclude = [
 venv = ".venv"
 venvPath = "."
 executionEnvironments = [{ root = "." }]
+reportConstantRedefinition = false
 
 [tool.uv.workspace]
 members = [

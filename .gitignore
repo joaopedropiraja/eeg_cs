@@ -14,11 +14,13 @@
 
 /docs/site/*
 .mypy_cache
-
 .venv
 /poetry.toml
 
+eeg_cs/db
 /physionet.org
+/cvx
+/cvx/*
+/files
 /files/*
-/dictionaries/*
-/eeg_cs/reference
+__pycache__

@@ -10,8 +10,11 @@ if TYPE_CHECKING:
   from collections.abc import Iterable, Mapping
 
 type Evaluation = tuple[
-  str, str, str, float, str, str, str, float, float, float, int, int
+  str, int, str, str, int, str, str, str, float, float, float, float, float, int, int
 ]
+
+
+TABLE_NAME = "evaluations_v2"
 
 
 @dataclass
@@ -23,12 +26,12 @@ class SQLiteClient:
     base_dir = Path(__file__).parent
 
     if self.db_path is None:
-      self.db_path = base_dir / "eeg_cs.sqlite3"
+      self.db_path = base_dir / "db_v2.sqlite3"
     else:
       self.db_path = Path(self.db_path)
 
     if self.schema_path is None:
-      self.schema_path = base_dir / "init.db"
+      self.schema_path = base_dir / "init.sql"
     else:
       self.schema_path = Path(self.schema_path)
 
@@ -82,38 +85,38 @@ class SQLiteClient:
       conn.commit()
       return cur.rowcount
 
-  # def query_all(
-  #   self,
-  #   sql: str,
-  #   params: Sequence[Any] | Mapping[str, Any] | None = None,
-  # ) -> list[dict[str, Any]]:
-  #   with self.connect() as conn:
-  #     rows = conn.execute(sql, params or []).fetchall()
-  #     return [dict(r) for r in rows]
+  def query_all(
+    self,
+    sql: str,
+    params: Sequence[Any] | Mapping[str, Any] | None = None,
+  ) -> list[dict[str, Any]]:
+    with self.connect() as conn:
+      rows = conn.execute(sql, params or []).fetchall()
+      return [dict(r) for r in rows]
 
-  # def query_one(
-  #   self,
-  #   sql: str,
-  #   params: Sequence[Any] | Mapping[str, Any] | None = None,
-  # ) -> dict[str, Any] | None:
-  #   with self.connect() as conn:
-  #     row = conn.execute(sql, params or []).fetchone()
-  #     return dict(row) if row else None
+  def query_one(
+    self,
+    sql: str,
+    params: Sequence[Any] | Mapping[str, Any] | None = None,
+  ) -> dict[str, Any] | None:
+    with self.connect() as conn:
+      row = conn.execute(sql, params or []).fetchone()
+      return dict(row) if row else None
 
-  # def executescript(self, script: str) -> None:
-  #   with self.connect() as conn:
-  #     conn.executescript(script)
-  #     conn.commit()
+  def executescript(self, script: str) -> None:
+    with self.connect() as conn:
+      conn.executescript(script)
+      conn.commit()
 
   def insert_evaluation(self, row: Evaluation) -> int:
-    sql = """
-            INSERT INTO evaluations (
-                dataset, channel, file_name, start_time_s, sensing_matrix,
-                sparsifying_matrix, algorithm, prd, sndr, elapsed_time_s,
+    sql = f"""
+            INSERT INTO {TABLE_NAME} (
+                dataset, fs, channel, file_name, start_time_idx, sensing_matrix,
+                sparsifying_matrix, algorithm, mean_freq, prd, nmse, sndr, elapsed_time_s,
                 compression_rate, segment_length_s
             ) VALUES (
-                :dataset, :channel, :file_name, :start_time_s, :sensing_matrix,
-                :sparsifying_matrix, :algorithm, :prd, :sndr, :elapsed_time_s,
+                :dataset, :fs, :channel, :file_name, :start_time_idx, :sensing_matrix,
+                :sparsifying_matrix, :algorithm, :mean_freq, :prd, :nmse, :sndr, :elapsed_time_s,
                 :compression_rate, :segment_length_s
             );
             """
@@ -121,14 +124,14 @@ class SQLiteClient:
     return self.execute(sql, row)
 
   def bulk_insert_evaluations(self, rows: Iterable[Evaluation]) -> int:
-    sql = """
-            INSERT INTO evaluations (
-                dataset, channel, file_name, start_time_s, sensing_matrix,
-                sparsifying_matrix, algorithm, prd, sndr, elapsed_time_s,
+    sql = f"""
+            INSERT INTO {TABLE_NAME} (
+                dataset, fs, channel, file_name, start_time_idx, sensing_matrix,
+                sparsifying_matrix, algorithm, mean_freq, prd, nmse, sndr, elapsed_time_s,
                 compression_rate, segment_length_s
             ) VALUES (
-                :dataset, :channel, :file_name, :start_time_s, :sensing_matrix,
-                :sparsifying_matrix, :algorithm, :prd, :sndr, :elapsed_time_s,
+                :dataset, :fs, :channel, :file_name, :start_time_idx, :sensing_matrix,
+                :sparsifying_matrix, :algorithm, :mean_freq, :prd, :nmse, :sndr, :elapsed_time_s,
                 :compression_rate, :segment_length_s
             );
             """
