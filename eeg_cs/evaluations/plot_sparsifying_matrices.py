@@ -5,6 +5,7 @@ from eeg_cs.db.client import SQLiteClient
 
 
 def plot_sparsifying_matrices_prd(
+  db_filename: str,
   sensing_matrix: str,
   algorithm: str,
   sparsifying_matrices: list[str],
@@ -13,7 +14,7 @@ def plot_sparsifying_matrices_prd(
   compression_rate: int | None = None,
   title: str = "PRD vs Sparsifying Matrix",
 ) -> None:
-  client = SQLiteClient()
+  client = SQLiteClient(db_filename)
 
   # Build base query
   query = """
@@ -128,10 +129,11 @@ def plot_sparsifying_matrices_prd(
 
 def main() -> None:
   # Example usage
-  sparsifying_matrices = ["DCT", "DST", "Wavelet_db4"]
+  sparsifying_matrices = ["DCT", "IDCT"]
 
   # Single comparison
   plot_sparsifying_matrices_prd(
+    db_filename="eeg_cs_evaluations.db",
     sensing_matrix="BPBD",
     algorithm="BPDN",
     sparsifying_matrices=sparsifying_matrices,

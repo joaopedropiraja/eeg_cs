@@ -1,17 +1,19 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
-from skimage.metrics import structural_similarity as ssim
 
 from eeg_cs.models.compressed_sensing import CompressedSensing
 from eeg_cs.models.loader import CHBMITLoader
 from eeg_cs.models.reconstruction_algorithm import (
-  OrthogonalMatchingPursuit,
+  CVXPBasisPursuitIndividual,
   ReconstructionAlgorithm,
+  SPGL1BasisPursuit,
 )
 from eeg_cs.models.sensing_matrix import (
   BinaryPermutedBlockDiagonal,
+  Gaussian,
   SensingMatrix,
+  Undersampled,
 )
 from eeg_cs.models.sparsifying_matrix import DCT, Gabor, SparsifyingMatrix, Wavelet
 
@@ -80,10 +82,10 @@ def plot_reconstructions(
     y = cs.compress(x)
     x_hat = cs.reconstruct(y)
 
-    prd, nmse, sndr = cs.evaluate(x, x_hat.flatten())
     print(x.shape, x_hat.shape)
-    similarity_score = ssim(x, x_hat[:, 0], data_range=x.max() - x.min())
-    print(f"Similarity score for {label}: {similarity_score:.4f}")
+
+    prd, nmse, sndr, ssim = cs.evaluate(x, x_hat.flatten())
+    print(f"Similarity score for {label}: {ssim:.4f}")
 
     letter = chr(ord("b") + i)
 
@@ -130,14 +132,13 @@ def plot_reconstructions(
 
 
 def main() -> None:
-  random_state = 50
   loader = CHBMITLoader()
 
-  fileName = "chb19_14.edf"
-  start_time_idx = 242176
+  fileName = "chb06_03.edf"
+  start_time_idx = 2885120
   segment_length_s = 2
   downsampled_fs = 256
-  ch_name = "F7-T7"
+  ch_name = "T7-FT9"
   signal = loader.get_signal(
     fileName, start_time_idx, segment_length_s, downsampled_fs, ch_name
   )
@@ -145,16 +146,17 @@ def main() -> None:
   N = loader.get_downsampled_n_samples(segment_length_s, downsampled_fs)
   cs_architectures = []
 
-  CR = 2
+  CR = 8
   M = int(N / CR)
   cs_architectures: list[CS_Architecture] = [
     (
-      # BinaryPermutedBlockDiagonal(M, CR),
-      SparseBinary(M, N, d=8, random_state=random_state),
+      BinaryPermutedBlockDiagonal(M, CR),
+      # Gaussian(M, N, random_state=512),
+      # SparseBinary(M, N, d=8, random_state=random_state),
       DCT(N),
       # CVXPBasisPursuitIndividual(),
-      OrthogonalMatchingPursuit(n_nonzero_coefs=180),
-      # SPGL1BasisPursuit(max_iter=10000, tol=1e-9),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=180),
+      SPGL1BasisPursuit(max_iter=10000, tol=1e-9),
       CR,
     ),
     # (
@@ -164,15 +166,30 @@ def main() -> None:
     #   CR,
     # ),
     (
+      # BinaryPermutedBlockDiagonal(M, CR),
       BinaryPermutedBlockDiagonal(M, CR),
+      # Gaussian(M, N, random_state=57),
       Wavelet(N, wavelet="db4", mode="periodization"),
-      OrthogonalMatchingPursuit(n_nonzero_coefs=180),
+      CVXPBasisPursuitIndividual(),
+      # SPGL1BasisPursuit(max_iter=10000, tol=1e-9),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=180),
       CR,
     ),
     (
-      BinaryPermutedBlockDiagonal(M, CR),
+      # BinaryPermutedBlockDiagonal(M, CR),
+      Gaussian(M, N, random_state=1015),
       Gabor(N, fs=downsampled_fs, tf=2, ff=4),
-      OrthogonalMatchingPursuit(n_nonzero_coefs=180),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=180),
+      SPGL1BasisPursuit(max_iter=10000, tol=1e-9),
+      CR,
+    ),
+    (
+      # BinaryPermutedBlockDiagonal(M, CR),
+      Undersampled(M, N, random_state=26),
+      DCT(N),
+      CVXPBasisPursuitIndividual(),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=180),
+      # SPGL1BasisPursuit(max_iter=10000, tol=1e-9),
       CR,
     ),
   ]

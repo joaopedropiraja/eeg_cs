@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import numpy.typing as npt
+from skimage.metrics import structural_similarity
 
 if TYPE_CHECKING:
   from .reconstruction_algorithm import ReconstructionAlgorithm
@@ -40,16 +41,29 @@ class CompressedSensing:
   @classmethod
   def evaluate(
     cls, X: npt.NDArray[np.float64], X_hat: npt.NDArray[np.float64]
-  ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+  ) -> tuple[
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+  ]:
     """
     Calculate metrics for the reconstruction.
+
+    Args:
+        X: Original signal(s)
+        X_hat: Reconstructed signal(s)
+
+    Returns:
+        Tuple of (prd, nmse, sndr, ssim) arrays
     """
 
     prd = cls._pdr(X, X_hat)
     nmse = cls._nmse(X, X_hat)
     sndr = cls._sndr(X, X_hat)
+    ssim = cls._ssim(X, X_hat)
 
-    return prd, nmse, sndr
+    return prd, nmse, sndr, ssim
 
   @staticmethod
   def _pdr(
@@ -57,13 +71,9 @@ class CompressedSensing:
   ) -> npt.NDArray[np.float64]:
     """
     Calculate percentage root mean square difference (PRD).
-
-    PRD = 100 * sqrt(||X - X_hat||²₂ / ||X - mean(X)||²₂)
     """
-    mu = X.mean(axis=0)
-
     num = np.linalg.norm(X - X_hat, axis=0) ** 2
-    den = np.linalg.norm(X - mu, axis=0) ** 2
+    den = np.linalg.norm(X, axis=0) ** 2
 
     return np.where(den == 0, np.inf, 100 * np.sqrt(num / den))
 
@@ -75,10 +85,8 @@ class CompressedSensing:
     Calculate normalized mean square error (NMSE).
     """
 
-    mu = X.mean(axis=0)
-
     num = np.linalg.norm(X - X_hat, axis=0) ** 2
-    den = np.linalg.norm(X - mu, axis=0) ** 2
+    den = np.linalg.norm(X, axis=0) ** 2
 
     return np.where(den == 0, np.inf, num / den)
 
@@ -90,10 +98,27 @@ class CompressedSensing:
     Calculate signal to noise and distortion ratio (SNDR).
     """
 
-    num = np.linalg.norm(X_hat, axis=0) ** 2
+    num = np.linalg.norm(X, axis=0) ** 2
     den = np.linalg.norm(X_hat - X, axis=0) ** 2
 
     return np.where(den == 0, np.inf, 10 * np.log10(num / den))
+
+  @staticmethod
+  def _ssim(
+    X: npt.NDArray[np.float64], X_hat: npt.NDArray[np.float64]
+  ) -> npt.NDArray[np.float64]:
+    if X.ndim == 1:
+      X = X[:, np.newaxis]
+      X_hat = X_hat[:, np.newaxis]
+
+    ssims = np.zeros(X.shape[1], dtype=np.float64)
+    for i, (x, x_hat) in enumerate(zip(X.T, X_hat.T, strict=False)):
+      ssims[i] = structural_similarity(x, x_hat, data_range=x.max() - x.min())
+
+    if len(ssims) == 1:
+      return ssims[0]
+
+    return ssims
 
   def _preprocess(self, X: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     if self.center_data:

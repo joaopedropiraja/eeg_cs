@@ -17,7 +17,7 @@
 .venv
 /poetry.toml
 
-eeg_cs/db
+/eeg_cs/db/*.sqlite3
 /physionet.org
 /cvx
 /cvx/*

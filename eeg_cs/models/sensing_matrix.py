@@ -41,8 +41,11 @@ class Gaussian(SensingMatrix):
     self._name = "Gaussian"
 
     rng = np.random.default_rng(random_state)
-    self._value = rng.normal(loc=0.0, scale=1, size=(m, n))
-    # Standard CS normalization: scale by 1/√n for unit row norm expectation
+
+    mu = 0.0
+    sigma = 1.0
+    self._value = rng.normal(loc=mu, scale=sigma, size=(m, n))
+
     self._scale = 1.0 / np.sqrt(n)
     self._value_normalized = self.value * self.scale
 

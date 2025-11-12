@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -10,32 +10,49 @@ if TYPE_CHECKING:
   from collections.abc import Iterable, Mapping
 
 type Evaluation = tuple[
-  str, int, str, str, int, str, str, str, float, float, float, float, float, int, int
+  str,
+  int,
+  str,
+  str,
+  int,
+  str,
+  str,
+  str,
+  float,
+  float,
+  float,
+  float,
+  float,
+  float,
+  int,
+  int,
 ]
 
 
-TABLE_NAME = "evaluations_v2"
+TABLE_NAME = "evaluations"
 
 
 @dataclass
 class SQLiteClient:
-  db_path: Path | str | None = None
-  schema_path: Path | str | None = None
+  db_filename: Path | str | None = None
+  schema_filename: Path | str | None = None
+
+  db_path: Path = field(init=False)
+  db_schema: Path = field(init=False)
 
   def __post_init__(self) -> None:
     base_dir = Path(__file__).parent
 
-    if self.db_path is None:
-      self.db_path = base_dir / "db_v2.sqlite3"
+    if self.db_filename is None:
+      self.db_path = base_dir / "db.sqlite3"
     else:
-      self.db_path = Path(self.db_path)
+      self.db_path = base_dir / Path(self.db_filename)
 
-    if self.schema_path is None:
+    if self.schema_filename is None:
       self.schema_path = base_dir / "init.sql"
     else:
-      self.schema_path = Path(self.schema_path)
+      self.schema_path = Path(self.schema_filename)
 
-    # Ensure parent directory exists
     self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
   def connect(self) -> sqlite3.Connection:
@@ -49,6 +66,7 @@ class SQLiteClient:
     with self.connect() as conn:
       conn.executescript(script)
       conn.commit()
+      print(f"Database schema created at {self.db_path}")
 
   def reset(self) -> None:
     with self.connect() as conn:
@@ -112,11 +130,11 @@ class SQLiteClient:
     sql = f"""
             INSERT INTO {TABLE_NAME} (
                 dataset, fs, channel, file_name, start_time_idx, sensing_matrix,
-                sparsifying_matrix, algorithm, mean_freq, prd, nmse, sndr, elapsed_time_s,
+                sparsifying_matrix, algorithm, mean_freq, prd, nmse, sndr, ssim, elapsed_time_s,
                 compression_rate, segment_length_s
             ) VALUES (
                 :dataset, :fs, :channel, :file_name, :start_time_idx, :sensing_matrix,
-                :sparsifying_matrix, :algorithm, :mean_freq, :prd, :nmse, :sndr, :elapsed_time_s,
+                :sparsifying_matrix, :algorithm, :mean_freq, :prd, :nmse, :sndr, :ssim, :elapsed_time_s,
                 :compression_rate, :segment_length_s
             );
             """
@@ -127,11 +145,11 @@ class SQLiteClient:
     sql = f"""
             INSERT INTO {TABLE_NAME} (
                 dataset, fs, channel, file_name, start_time_idx, sensing_matrix,
-                sparsifying_matrix, algorithm, mean_freq, prd, nmse, sndr, elapsed_time_s,
+                sparsifying_matrix, algorithm, mean_freq, prd, nmse, sndr, ssim, elapsed_time_s,
                 compression_rate, segment_length_s
             ) VALUES (
                 :dataset, :fs, :channel, :file_name, :start_time_idx, :sensing_matrix,
-                :sparsifying_matrix, :algorithm, :mean_freq, :prd, :nmse, :sndr, :elapsed_time_s,
+                :sparsifying_matrix, :algorithm, :mean_freq, :prd, :nmse, :sndr, :ssim, :elapsed_time_s,
                 :compression_rate, :segment_length_s
             );
             """

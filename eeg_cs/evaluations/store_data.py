@@ -11,20 +11,16 @@ from scipy.signal import welch
 
 from eeg_cs.db.client import Evaluation, SQLiteClient
 from eeg_cs.models.compressed_sensing import CompressedSensing
-from eeg_cs.models.loader import BCIIVLoader, CHBMITLoader, Loader
+from eeg_cs.models.loader import BCIIIILoader, BCIIVLoader, CHBMITLoader, Loader
 from eeg_cs.models.reconstruction_algorithm import (
-  OrthogonalMatchingPursuit,
+  CVXPBasisPursuitIndividual,
   ReconstructionAlgorithm,
-  SPGL1BasisPursuit,
-  SPGL1BasisPursuitDenoising,
 )
 from eeg_cs.models.sensing_matrix import (
   BinaryPermutedBlockDiagonal,
-  Gaussian,
   SensingMatrix,
-  SparseBinary,
 )
-from eeg_cs.models.sparsifying_matrix import CS, DCT, IDCT, SparsifyingMatrix
+from eeg_cs.models.sparsifying_matrix import SparsifyingMatrix, Wavelet
 
 # Suppress all warnings
 warnings.filterwarnings("ignore")
@@ -129,7 +125,7 @@ def execute_job(job: Job) -> list[Evaluation]:
 
     del Y
 
-    prds, nmses, sndrs = CompressedSensing.evaluate(X, X_hat)
+    prds, nmses, sndrs, ssims = CompressedSensing.evaluate(X, X_hat)
 
     del X, X_hat
 
@@ -149,6 +145,7 @@ def execute_job(job: Job) -> list[Evaluation]:
           float(prds[i]),
           float(nmses[i]),
           float(sndrs[i]),
+          float(ssims[i]),
           elapsed_time_s,
           compression_rate,
           segment_length_s,
@@ -231,130 +228,143 @@ def estimate_total_jobs(
 
 
 def main() -> None:
-  CR = 2
-  segment_length_s = 2
-  total_number_of_blocks_per_loader = 400
-  downsampled_fs = 256
-  max_blocks_per_file_per_run = 1
-  random_state = 10
+  client = SQLiteClient(db_filename="eeg_cs_evaluations.db")
+  # client.reset()
 
-  buffer_size = 500  # Larger buffer for better DB performance
-  chunksize = 25  # Smaller chunks for better memory management
+  CRs = [2]
+  for CR in CRs:
+    logger.info(f"Starting evaluations for Compression Rate (CR): {CR}")
 
-  logger.info("Initializing loaders and matrices...")
+    segment_length_s = 4
+    total_number_of_blocks_per_loader = 300
+    downsampled_fs = 128
+    max_blocks_per_file_per_run = 5
 
-  loaders: list[Loader] = [
-    CHBMITLoader(),
-    BCIIVLoader(),
-    # BCIIIILoader(),
-  ]
+    buffer_size = 1000  # Larger buffer for better DB performance
+    chunksize = 25  # Smaller chunks for better memory management
 
-  first_loader = loaders[0]
-  N = first_loader.get_downsampled_n_samples(segment_length_s, downsampled_fs)
-  M = N // CR
+    logger.info("Initializing loaders and matrices...")
 
-  logger.info(f"Signal length (N): {N}, Measurements (M): {M}")
+    loaders: list[Loader] = [CHBMITLoader(), BCIIVLoader(), BCIIIILoader()]
 
-  sensing_matrices: list[SensingMatrix] = [
-    BinaryPermutedBlockDiagonal(M, CR),
-    Gaussian(M, N, random_state),
-    # Bernoulli(M, N, random_state),
-    # Undersampled(M, N, random_state),
-    SparseBinary(M, N, d=8, random_state=random_state),
-    SparseBinary(M, N, d=16, random_state=random_state),
-    SparseBinary(M, N, d=32, random_state=random_state),
-  ]
-  sparsifying_matrices: list[SparsifyingMatrix] = [
-    DCT(N),
-    # Wavelet(N, wavelet="db4", mode="periodization", levels=5),
-    # Wavelet(N, wavelet="sym6", mode="periodization", levels=5),
-    # Gabor(N, fs=downsampled_fs, tf=2, ff=2),
-    # DST(N),
-    CS(N),
-    IDCT(N),
-    # ICS(N),
-  ]
+    first_loader = loaders[0]
+    N = first_loader.get_downsampled_n_samples(segment_length_s, downsampled_fs)
+    M = N // CR
 
-  reconstruction_algorithms: list[ReconstructionAlgorithm] = [
-    SPGL1BasisPursuit(max_iter=10000000, tol=1e-9),
-    SPGL1BasisPursuitDenoising(max_iter=10000000, sigma_factor=1e-9),
-    # CVXPBasisPursuitDenoisingIndividual(sigma_factor=1e-6),
-    # CVXPBasisPursuit(),
-    # CVXPBasisPursuitIndividual(),
-    OrthogonalMatchingPursuit(tol=1e-12),
-    # OrthogonalMatchingPursuit(n_nonzero_coefs=90),
-    # OrthogonalMatchingPursuit(n_nonzero_coefs=100),
-    # OrthogonalMatchingPursuit(n_nonzero_coefs=150),
-    # OrthogonalMatchingPursuit(n_nonzero_coefs=180),
-    # OrthogonalMatchingPursuit(n_nonzero_coefs=30, tol=1e-9),
-    # OrthogonalMatchingPursuit(n_nonzero_coefs=35, tol=1e-9),
-    # OrthogonalMatchingPursuit(n_nonzero_coefs=40, tol=1e-9),
-    # OrthogonalMatchingPursuit(n_nonzero_coefs=45, tol=1e-9),
-    # OrthogonalMatchingPursuit(n_nonzero_coefs=50, tol=1e-9),
-    # OrthogonalMatchingPursuit(n_nonzero_coefs=75, tol=1e-9),
-    # OrthogonalMatchingPursuit(n_nonzero_coefs=100, tol=1e-8),
-    # OrthogonalMatchingPursuit(n_nonzero_coefs=150, tol=1e-8),
-    # OrthogonalMatchingPursuit(n_nonzero_coefs=250, tol=1e-8),
-  ]
+    logger.info(f"Signal length (N): {N}, Measurements (M): {M}")
 
-  # Estimate total for progress tracking
-  total_estimated = estimate_total_jobs(
-    loaders,
-    sensing_matrices,
-    sparsifying_matrices,
-    reconstruction_algorithms,
-    total_number_of_blocks_per_loader,
-  )
+    sensing_matrices: list[SensingMatrix] = [
+      # Gaussian(M, N, random_state=512),
+      # SparseBinary(M, N, d=8, random_state=338),
+      # SparseBinary(M, N, d=12, random_state=234),
+      # SparseBinary(M, N, d=16, random_state=426),
+      # SparseBinary(M, N, d=20, random_state=50),
+      # SparseBinary(M, N, d=24, random_state=489),
+      # SparseBinary(M, N, d=28, random_state=639),
+      # SparseBinary(M, N, d=32, random_state=418),
+      # SparseBinary(M, N, d=36, random_state=926),
+      # SparseBinary(M, N, d=40, random_state=185),
+      BinaryPermutedBlockDiagonal(M, CR),
+    ]
+    sparsifying_matrices: list[SparsifyingMatrix] = [
+      # DCT(N),
+      Wavelet(N, wavelet="db4", mode="periodization", levels=5),
+      # Wavelet(N, wavelet="sym6", mode="periodization", levels=5),
+      # DST(N),
+      # CS(N),
+      # IDCT(N),
+      # ICS(N),
+    ]
 
-  logger.info(f"Estimated total jobs: {total_estimated}")
+    reconstruction_algorithms: list[ReconstructionAlgorithm] = [
+      # Cosamp(sparsity=100, max_iter=10000, tol=1e-9),
+      # SPGL1BasisPursuit(max_iter=10000000, tol=1e-9),
+      # SPGL1BasisPursuitDenoising(max_iter=10000000, sigma_factor=1e-9),
+      # CVXPBasisPursuitDenoisingIndividual(sigma_factor=1e-6),
+      # CVXPBasisPursuit(),
+      CVXPBasisPursuitIndividual(),
+      # OrthogonalMatchingPursuit(tol=1e-12),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=10),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=20),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=30),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=40),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=50),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=60),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=80),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=100),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=120),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=150),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=180),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=210),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=100),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=150),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=180),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=30, tol=1e-9),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=35, tol=1e-9),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=40, tol=1e-9),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=45, tol=1e-9),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=50, tol=1e-9),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=75, tol=1e-9),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=100, tol=1e-8),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=150, tol=1e-8),
+      # OrthogonalMatchingPursuit(n_nonzero_coefs=250, tol=1e-8),
+    ]
 
-  client = SQLiteClient()
-  client.reset()
+    # Estimate total for progress tracking
+    total_estimated = estimate_total_jobs(
+      loaders,
+      sensing_matrices,
+      sparsifying_matrices,
+      reconstruction_algorithms,
+      total_number_of_blocks_per_loader,
+    )
 
-  num_processes = max(1, cpu_count() - 1)
-  logger.info(f"Using {num_processes} processes")
+    logger.info(f"Estimated total jobs: {total_estimated}")
 
-  jobs_generator = create_jobs_generator(
-    loaders,
-    sensing_matrices,
-    sparsifying_matrices,
-    reconstruction_algorithms,
-    total_number_of_blocks_per_loader,
-    downsampled_fs,
-    CR,
-    segment_length_s,
-    max_blocks_per_file_per_run,
-    random_state,
-  )
+    num_processes = max(1, cpu_count() - 1)
+    logger.info(f"Using {num_processes} processes")
 
-  evaluations_buffer: list[Evaluation] = []
-  processed_count = 0
+    jobs_generator = create_jobs_generator(
+      loaders,
+      sensing_matrices,
+      sparsifying_matrices,
+      reconstruction_algorithms,
+      total_number_of_blocks_per_loader,
+      downsampled_fs,
+      CR,
+      segment_length_s,
+      max_blocks_per_file_per_run,
+      random_state=42,
+    )
 
-  with Pool(processes=num_processes) as pool:
-    for result_batch in pool.imap_unordered(execute_job, jobs_generator, chunksize):
-      if result_batch:
-        evaluations_buffer.extend(result_batch)
-        processed_count += 1
+    evaluations_buffer: list[Evaluation] = []
+    processed_count = 0
 
-      if len(evaluations_buffer) >= buffer_size:
-        rows_inserted = client.bulk_insert_evaluations(evaluations_buffer)
-        logger.info(
-          f"Inserted {rows_inserted} evaluations. "
-          f"Progress: {processed_count}/{total_estimated}"
-        )
-        evaluations_buffer.clear()
+    with Pool(processes=num_processes) as pool:
+      for result_batch in pool.imap_unordered(execute_job, jobs_generator, chunksize):
+        if result_batch:
+          evaluations_buffer.extend(result_batch)
+          processed_count += 1
 
-      if processed_count % 50 == 0:
-        logger.info(f"Processed {processed_count}/{total_estimated} jobs")
+        if len(evaluations_buffer) >= buffer_size:
+          rows_inserted = client.bulk_insert_evaluations(evaluations_buffer)
+          logger.info(
+            f"Inserted {rows_inserted} evaluations. "
+            f"Progress: {processed_count}/{total_estimated}"
+          )
+          evaluations_buffer.clear()
 
-  if evaluations_buffer:
-    rows_inserted = client.bulk_insert_evaluations(evaluations_buffer)
-    logger.info(f"Final insert: {rows_inserted} evaluations")
+        if processed_count % 50 == 0:
+          logger.info(f"Processed {processed_count}/{total_estimated} jobs")
 
-  logger.info(f"Processing complete! Total jobs processed: {processed_count}")
+    if evaluations_buffer:
+      rows_inserted = client.bulk_insert_evaluations(evaluations_buffer)
+      logger.info(f"Final insert: {rows_inserted} evaluations")
 
-  for loader in loaders:
-    loader.save(f"temp/{loader.dataset}_state.pkl")
+    logger.info(f"Processing complete! Total jobs processed: {processed_count}")
+
+    # for loader in loaders:
+    #   loader.save(f"temp/{loader.dataset}_state.pkl")
 
 
 if __name__ == "__main__":

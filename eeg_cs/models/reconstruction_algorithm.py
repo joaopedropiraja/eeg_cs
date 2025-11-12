@@ -24,6 +24,102 @@ class ReconstructionAlgorithm(ABC):
   ) -> npt.NDArray[np.float64]: ...
 
 
+class Cosamp(ReconstructionAlgorithm):
+  def __init__(self, sparsity: int, max_iter: int = 50, tol: float = 1e-6) -> None:
+    self.k = int(sparsity)
+    self.max_iter = int(max_iter)
+    self.tol = float(tol)
+    self._name = f"Cosamp_k{self.k}"
+
+  def solve(
+    self, Y: npt.NDArray[np.float64], Theta: npt.NDArray[np.float64]
+  ) -> npt.NDArray[np.float64]:
+    """Recover sparse signal(s) X from measurements Y = Theta @ X.
+
+    Accepts `Y` as shape (m,) or (m, K). Returns X of shape (n,) or (n, K).
+    """
+    if Y.ndim == 1:
+      Y = Y[:, np.newaxis]
+
+    m, n = Theta.shape
+    K = Y.shape[1]
+
+    S = np.zeros((n, K), dtype=float)
+    for idx in range(K):
+      y = Y[:, idx]
+      x_hat = self._cosamp_single(y, Theta)
+      S[:, idx] = x_hat
+
+    return S
+
+  def _cosamp_single(
+    self, y: npt.NDArray[np.float64], Theta: npt.NDArray[np.float64]
+  ) -> npt.NDArray[np.float64]:
+    m, n = Theta.shape
+
+    # Initialization
+    residual = y.copy()
+    support: list[int] = []
+    x = np.zeros(n, dtype=float)
+
+    for _ in range(self.max_iter):
+      # Proxy = Theta^T * residual
+      proxy = Theta.T @ residual
+
+      # Identify 2k largest components in magnitude
+      omega = np.argpartition(np.abs(proxy), -2 * self.k)[-2 * self.k :]
+
+      # Merge supports
+      merged = np.union1d(np.array(support, dtype=int), omega)
+
+      # Restrict Theta to merged support
+      if merged.size == 0:
+        break
+
+      Theta_merged = Theta[:, merged]
+
+      # Solve least squares on merged support
+      try:
+        b_merged, *_ = np.linalg.lstsq(Theta_merged, y, rcond=None)
+      except np.linalg.LinAlgError:
+        b_merged = np.linalg.pinv(Theta_merged) @ y
+
+      # Keep k largest entries from b_merged
+      abs_b = np.abs(b_merged)
+      if abs_b.size <= self.k:
+        # All entries kept
+        new_support = merged.astype(int)
+      else:
+        topk_idx = np.argpartition(abs_b, -self.k)[-self.k :]
+        new_support = merged[topk_idx].astype(int)
+
+      # Form new estimate on new_support
+      Theta_s = Theta[:, new_support]
+      try:
+        x_s, *_ = np.linalg.lstsq(Theta_s, y, rcond=None)
+      except np.linalg.LinAlgError:
+        x_s = np.linalg.pinv(Theta_s) @ y
+
+      # Update full signal estimate
+      x.fill(0.0)
+      x[new_support] = x_s
+
+      # Update residual
+      residual = y - Theta @ x
+
+      # Stopping criteria
+      if np.linalg.norm(residual) < self.tol:
+        break
+
+      # If support didn't change, we can stop
+      if set(new_support.tolist()) == set(support):
+        break
+
+      support = new_support.tolist()
+
+    return x
+
+
 class OrthogonalMatchingPursuit(ReconstructionAlgorithm):
   """
   Orthogonal Matching Pursuit (OMP) reconstruction algorithm using scikit-learn.
@@ -39,21 +135,14 @@ class OrthogonalMatchingPursuit(ReconstructionAlgorithm):
   def solve(
     self, Y: npt.NDArray[np.float64], Theta: npt.NDArray[np.float64]
   ) -> npt.NDArray[np.float64]:
-    if Y.ndim == 1:
-      Y = Y[:, np.newaxis]
-
     omp = SklearnOMP(n_nonzero_coefs=self.n_nonzero_coefs, tol=self.tol)
     omp.fit(Theta, Y)
 
-    return np.array(omp.coef_).T
+    S = np.array(omp.coef_)
+    if S.ndim == 1:
+      S = S[np.newaxis, :]
 
-    # S = []
-    # for y in Y.T:
-    #   omp = SklearnOMP(n_nonzero_coefs=self.n_nonzero_coefs)
-    #   omp.fit(Theta, y)
-    #   S.append(omp.coef_)
-
-    # return np.array(S).T
+    return S.T
 
 
 # class SimultaneousOrthogonalMatchingPursuit(ReconstructionAlgorithm):
@@ -157,6 +246,32 @@ class SPGL1BasisPursuit(ReconstructionAlgorithm):
     return np.array(S).T
 
 
+class SPGL1BasisPursuitDenoising(ReconstructionAlgorithm):
+  """
+  Basis Pursuit using SPGL1 Python library.
+  """
+
+  def __init__(self, max_iter: int = 1000, sigma_factor: float = 0.001) -> None:
+    self.sigma_factor = sigma_factor
+    self.max_iter = max_iter
+    self._name = "BPDN"
+
+  def solve(
+    self, Y: npt.NDArray[np.float64], Theta: npt.NDArray[np.float64]
+  ) -> npt.NDArray[np.float64]:
+    if Y.ndim == 1:
+      Y = Y[:, np.newaxis]  # Ensure Y is 2D for multiple signals.
+
+    S = []
+    for y in Y.T:
+      sigma = self.sigma_factor * np.linalg.norm(y)
+      # Solve Basis Pursuit problem
+      x, _, _, _ = spgl1.spg_bpdn(Theta, y, sigma=sigma, iter_lim=self.max_iter)
+      S.append(x)
+
+    return np.array(S).T
+
+
 class CVXPBasisPursuit(ReconstructionAlgorithm):
   """
   Basis Pursuit using CVXPY library for convex optimization.
@@ -218,7 +333,9 @@ class CVXPBasisPursuitIndividual(ReconstructionAlgorithm):
   This version solves the optimization problem for each signal individually.
   """
 
-  def __init__(self, solver: str = "CLARABEL", verbose: bool = False) -> None:
+  def __init__(
+    self, solver: str = "CLARABEL", max_iter: int = 100000, verbose: bool = False
+  ) -> None:
     """
     Initialize CVXPY Basis Pursuit solver for individual signal processing.
 
@@ -230,6 +347,7 @@ class CVXPBasisPursuitIndividual(ReconstructionAlgorithm):
         Whether to print solver output.
     """
     self.solver = solver
+    self.max_iter = max_iter
     self.verbose = verbose
     self._name = f"CVXP_BP_IND_{solver}"
 
@@ -275,7 +393,7 @@ class CVXPBasisPursuitIndividual(ReconstructionAlgorithm):
 
       # Create and solve problem
       problem = cp.Problem(objective, constraints)
-      problem.solve(solver=self.solver, verbose=self.verbose)
+      problem.solve(solver=self.solver, verbose=self.verbose, max_iter=self.max_iter)
 
       X_result[:, k] = x.value
 
@@ -362,29 +480,3 @@ class CVXPBasisPursuitDenoisingIndividual(ReconstructionAlgorithm):
       X_result[:, k] = x.value
 
     return X_result
-
-
-class SPGL1BasisPursuitDenoising(ReconstructionAlgorithm):
-  """
-  Basis Pursuit using SPGL1 Python library.
-  """
-
-  def __init__(self, max_iter: int = 1000, sigma_factor: float = 0.001) -> None:
-    self.sigma_factor = sigma_factor
-    self.max_iter = max_iter
-    self._name = "BPDN"
-
-  def solve(
-    self, Y: npt.NDArray[np.float64], Theta: npt.NDArray[np.float64]
-  ) -> npt.NDArray[np.float64]:
-    if Y.ndim == 1:
-      Y = Y[:, np.newaxis]  # Ensure Y is 2D for multiple signals.
-
-    S = []
-    for y in Y.T:
-      sigma = self.sigma_factor * np.linalg.norm(y)
-      # Solve Basis Pursuit problem
-      x, _, _, _ = spgl1.spg_bpdn(Theta, y, sigma=sigma, iter_lim=self.max_iter)
-      S.append(x)
-
-    return np.array(S).T
